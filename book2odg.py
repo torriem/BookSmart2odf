@@ -32,10 +32,7 @@ def create_frame(pageno, frameno, x,y, width, height, zindex, transparent=False)
 def setup_odt(bodf, bs):
     # set up metadata
     e = Element(ns('dc:creator'))
-    if 'authorname' in bs.info:
-        e.text = bs.info['authorname']
-    else:
-        e.text = ''
+    e.text = bs.info['authorname']
     bodf.meta.meta.append(e)
     e = Element(ns('dc:title'))
     e.text = bs.info['booktitle']
@@ -490,8 +487,7 @@ if __name__ == "__main__":
 
     print (bs.info['booktitle'])
     print (bs.info['subtitle'])
-    if 'authorname' in bs.info:
-        print (bs.info['authorname'])
+    print (bs.info['authorname'])
     print ('Width: %d, Height: %d' % (bs.width, bs.height))
     print ('Pages: %d' % len(bs.pages))
 

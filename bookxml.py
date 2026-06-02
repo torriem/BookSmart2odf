@@ -15,9 +15,44 @@ class TextBox(object):
             self.height = 0
 
         self.paragraphs = []
+        self.border = None # a Border object, if this text box has a decorative border
 
     def __repr__(self):
         return ('TextBox(%d,%d,%d,%d,%s)' % (self.x, self.y, self.width, self.height, repr(self.paragraphs)))
+
+    def __str__(self):
+        return repr(self)
+
+class Border(object):
+    """A decorative border (BorderDefinition) attached to a text box.
+
+    The border places one or more ornament images (SVGs from the theme
+    library) along the edges of the text box.  See BEV_FORMAT.md and the
+    BorderDefinition rendering notes for details.
+    """
+
+    # mirrorEdge values (from BorderDefinition.class constants)
+    MIRROR_OFF = 0      # only the declared edges are drawn
+    MIRROR_ALL = 1      # declared edge mirrored/rotated to all four sides
+    MIRROR_OPPOSITE = 2 # declared edge mirrored to the opposite side
+
+    def __init__(self, xmlelement):
+        self.inset = int(xmlelement.get('inset', '0'))
+        self.color = '#%s' % xmlelement.get('color', '#ff000000')[-6:]
+        self.tile_edges = xmlelement.get('tileEdges', 'false') == 'true'
+        self.mirror_edge = int(xmlelement.get('mirrorEdge', '0'))
+
+        # location -> image stem (without the .svg extension)
+        self.edges = {}
+        for edge in xmlelement.findall('edge'):
+            location = edge.get('location')
+            image = edge.get('image', '')
+            if location and image:
+                self.edges[location] = os.path.splitext(image)[0]
+
+    def __repr__(self):
+        return 'Border(inset=%d, color=%s, tile=%s, mirror=%d, edges=%s)' % (
+            self.inset, self.color, self.tile_edges, self.mirror_edge, self.edges)
 
     def __str__(self):
         return repr(self)
@@ -650,7 +685,8 @@ class BookXML(object):
                 dm = tc.find('dm')
 
                 border_definition = tc.find('BorderDefinition')
-                # TODO: handle borders if
+                if border_definition is not None:
+                    text_box.border = Border(border_definition)
 
                 dmtext = dm.text.encode('utf-8')
                 dmobj = lxml.etree.fromstring(dmtext)[0] # get the first child of the java node
