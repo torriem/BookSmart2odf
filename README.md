@@ -8,7 +8,7 @@ Blurb's BookSmart application is long discontinued. This script lets you recover
 the contents of your old books, including full text, styles, images, decorative text-box
 borders, and the cover, into an open, editable format.
 
-Note I have only tested this with my own photo books.  You may have to do manual editing to everything correct.
+Note I have only tested this with my own photo books.  You may have to do manual editing to ensure everything is correct.
 
 ## Usage
 
