@@ -169,7 +169,7 @@ def make_edge_paragraph(bodf, spec, border, is_top, frame_no,
 
 
 def make_edge_frame(bodf, spec, tb, is_top, frame_no, booksmart_dir,
-                    tempdir, registered, zindex, layer=None):
+                    tempdir, registered, zindex, layer=None, x_offset=0):
     """Build an absolutely-positioned draw:frame for a border ornament (ODG).
 
     Draw does not render the in-flow ornament that ``make_edge_paragraph``
@@ -183,7 +183,7 @@ def make_edge_frame(bodf, spec, tb, is_top, frame_no, booksmart_dir,
         return None
     image_name, width, height = embedded
 
-    x = tb.x + tb.width / 2.0 - width / 2.0
+    x = tb.x + tb.width / 2.0 - width / 2.0 + x_offset
     if is_top:
         y = tb.y
     else:

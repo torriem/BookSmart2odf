@@ -26,7 +26,7 @@ def ns(combined_name):
 
 def create_outer_frame(frameno, x, y, width, height, zindex,
                        transparent=False, pageno=None, layer=None,
-                       style_name=None):
+                       style_name=None, x_offset=0):
     """Create the outer draw:frame for a text or image box.
 
     When ``pageno`` is given (ODT) the frame is page-anchored; when it is None
@@ -46,7 +46,7 @@ def create_outer_frame(frameno, x, y, width, height, zindex,
         draw_frame.attrib[ns('draw:layer')] = layer
     draw_frame.attrib[ns('svg:width')] = '%dpt' % width
     draw_frame.attrib[ns('svg:height')] = '%dpt' % height
-    draw_frame.attrib[ns('svg:x')] = '%dpt' % x
+    draw_frame.attrib[ns('svg:x')] = '%dpt' % (x + x_offset)
     draw_frame.attrib[ns('svg:y')] = '%dpt' % y
     if pageno is not None:
         draw_frame.attrib[ns('text:anchor-type')] = 'page'
@@ -54,6 +54,36 @@ def create_outer_frame(frameno, x, y, width, height, zindex,
     draw_frame.attrib[ns('draw:z-index')] = '%d' % (zindex + 1)
 
     return draw_frame
+
+
+def build_bg_rect(bodf, x, y, width, height, color, name, zindex,
+                  pageno=None, layer=None):
+    """Build a solid-filled draw:rect, used for per-part cover backgrounds."""
+    style_name = 'bgrect%s' % name
+    ss = Element(ns('style:style'))
+    ss.attrib[ns('style:family')] = 'graphic'
+    ss.attrib[ns('style:name')] = style_name
+    gp = Element(ns('style:graphic-properties'))
+    gp.attrib[ns('draw:fill')] = 'solid'
+    gp.attrib[ns('draw:fill-color')] = color
+    gp.attrib[ns('draw:stroke')] = 'none'
+    ss.append(gp)
+    bodf.content.automatic_styles.xmlnode.append(ss)
+
+    rect = Element(ns('draw:rect'))
+    rect.attrib[ns('draw:name')] = 'BG%s' % name
+    rect.attrib[ns('draw:style-name')] = style_name
+    if layer is not None:
+        rect.attrib[ns('draw:layer')] = layer
+    rect.attrib[ns('svg:width')] = '%dpt' % width
+    rect.attrib[ns('svg:height')] = '%dpt' % height
+    rect.attrib[ns('svg:x')] = '%dpt' % x
+    rect.attrib[ns('svg:y')] = '%dpt' % y
+    if pageno is not None:
+        rect.attrib[ns('text:anchor-type')] = 'page'
+        rect.attrib[ns('text:anchor-page-number')] = '%d' % (pageno + 1)
+    rect.attrib[ns('draw:z-index')] = '%d' % zindex
+    return rect
 
 
 def emit_metadata(bodf, bs):
@@ -227,7 +257,7 @@ def emit_frame_styles(bodf, fill_none=False):
 def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
                   booksmart_dir=None, tempdir=None, border_images=None,
                   layer=None, include_borders=True,
-                  pad_top=0, pad_bottom=0):
+                  pad_top=0, pad_bottom=0, x_offset=0):
     """Build the outer draw:frame for a text box (text-box + paragraphs + borders).
 
     Returns (outer_frame, frame_no) where frame_no has been advanced by any
@@ -263,7 +293,7 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
     outer_frame = create_outer_frame(frame_no, tb.x, tb.y,
                                      tb.width, tb.height, page_item_count,
                                      transparent=True, pageno=pageno, layer=layer,
-                                     style_name=style_name)
+                                     style_name=style_name, x_offset=x_offset)
 
     dtb = Element(ns('draw:text-box'))
     dtb.attrib[ns('fo:max-height')] = '%dpt' % tb.height
@@ -317,9 +347,9 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
     return outer_frame, frame_no
 
 
-def prepare_images(bs, page, **kwargs):
-    """Fix DPI / cropping of every image on a page before it is emitted."""
-    for ib in bs.images[page]:
+def prepare_images(images, **kwargs):
+    """Fix DPI / cropping of a list of image boxes before they are emitted."""
+    for ib in images:
         # if we're just linking the images, and if the image
         # requires its DPI adjusted, the default is to
         # make a copy in the same folder as it came from, fix
@@ -341,7 +371,8 @@ def prepare_images(bs, page, **kwargs):
 
 
 def build_image(bodf, ib, frame_no, page_item_count, pageno=None,
-                link_images=False, book_path=None, layer=None, flatten=False):
+                link_images=False, book_path=None, layer=None, flatten=False,
+                x_offset=0):
     """Build the draw:frame for an image box (crop style + image).
 
     ODT (``flatten=False``) nests the image: an outer box frame containing a
@@ -415,7 +446,7 @@ def build_image(bodf, ib, frame_no, page_item_count, pageno=None,
             draw_frame.attrib[ns('draw:layer')] = layer
         draw_frame.attrib[ns('svg:width')] = '%dpt' % ib.width
         draw_frame.attrib[ns('svg:height')] = '%dpt' % ib.height
-        draw_frame.attrib[ns('svg:x')] = '%dpt' % (ib.box_x + ib.x)
+        draw_frame.attrib[ns('svg:x')] = '%dpt' % (ib.box_x + ib.x + x_offset)
         draw_frame.attrib[ns('svg:y')] = '%dpt' % (ib.box_y + ib.y)
         draw_frame.attrib[ns('draw:z-index')] = '%d' % (page_item_count + 1)
         draw_frame.append(draw_image)
@@ -425,7 +456,8 @@ def build_image(bodf, ib, frame_no, page_item_count, pageno=None,
     # positions the image within the box to emulate BookSmart pan/zoom/crop.
     outer_frame = create_outer_frame(frame_no, ib.box_x, ib.box_y,
                                      ib.width, ib.height, page_item_count,
-                                     transparent=False, pageno=pageno, layer=layer)
+                                     transparent=False, pageno=pageno, layer=layer,
+                                     x_offset=x_offset)
 
     draw_text_subbox = Element(ns('draw:text-box'))
     draw_text_subbox.attrib[ns('fo:max-height')] = '%dpt' % ib.height

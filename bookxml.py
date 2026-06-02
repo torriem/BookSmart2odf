@@ -57,6 +57,28 @@ class Border(object):
     def __str__(self):
         return repr(self)
 
+class CoverPart(object):
+    """One part of a book cover (front flap, front cover, spine, etc.).
+
+    Each part has its own dimensions and background, and holds text boxes and
+    images parsed exactly like a body page.
+    """
+
+    def __init__(self, title, width, height, bgcolor):
+        self.title = title
+        self.width = width    # in points
+        self.height = height
+        self.bgcolor = bgcolor
+        self.text_boxes = []
+        self.images = []
+
+    def __repr__(self):
+        return 'CoverPart(%s, %dx%d, %s)' % (self.title, self.width,
+                                             self.height, self.bgcolor)
+
+    def __str__(self):
+        return repr(self)
+
 class ImageBox(object):
     OVERWRITE = 1
     SAVEASCOPY = 2
@@ -563,9 +585,12 @@ class BookXML(object):
         self._page_style_cache = {}
 
         self.fonts = []
+        self.cover = None       # list of CoverPart, or None if no cover
+        self.cover_type = None  # 'hard' or 'soft'
 
         self.read_book_styles()
         self.read_pages()
+        self.read_cover()
 
 
         
@@ -655,8 +680,13 @@ class BookXML(object):
             if 'pagination' in pagetag.attrib:
                 self.page_info[id_]['pagination'] = pagetag.attrib['pagination']
 
-            self.text_boxes[id_] = []
-            for tc in self.book_objects.findall("TextContent[@parentId='%s']" % id_):
+            self.text_boxes[id_] = self._read_text_boxes(id_, pageno)
+            self.images[id_] = self._read_images(id_, pageno)
+
+    def _read_text_boxes(self, parent_id, pageno):
+        """Parse all TextContent boxes for a page/cover-part into TextBox list."""
+        text_boxes = []
+        for tc in self.book_objects.findall("TextContent[@parentId='%s']" % parent_id):
                 text_box = TextBox(tc.attrib['re'])
 
                 coords = [ float(n) for n in tc.attrib['re'].split(',') ]
@@ -831,10 +861,14 @@ class BookXML(object):
 
                     paragraph.style = pstyle.name
                     text_box.paragraphs.append(paragraph)
-                self.text_boxes[id_].append(text_box)
+                text_boxes.append(text_box)
 
-            self.images[id_] = []
-            for ic in self.book_objects.findall("ImageContent[@parentId='%s']" % id_):
+        return text_boxes
+
+    def _read_images(self, parent_id, pageno):
+        """Parse all ImageContent boxes for a page/cover-part into ImageBox list."""
+        images = []
+        for ic in self.book_objects.findall("ImageContent[@parentId='%s']" % parent_id):
                 if not 'content' in ic.attrib:
                     #print ("imagecontent %s has no image." % ic.attrib['id'])
                     # empty box, no image, skip
@@ -862,7 +896,7 @@ class BookXML(object):
                     transform = ic[0][0]
 
                     imagebox.x = float(transform.attrib['x']) # in pts
-                    imagebox.y = float(transform.attrib['y']) 
+                    imagebox.y = float(transform.attrib['y'])
 
                     imagebox.zoom = float(transform.attrib['zoom']) / 100
                     if transform.attrib['vflip'] == 'true':
@@ -876,7 +910,49 @@ class BookXML(object):
                         imagebox.hflip = False
 
                 #print ("found %s on page %d" % (ic.attrib['content'], pageno+1))
-                self.images[id_].append(imagebox)
+                images.append(imagebox)
+
+        return images
+
+    def read_cover(self):
+        """Parse the book cover (HardCover/SoftCover) into self.cover.
+
+        Each referenced CoverPage becomes a CoverPart with its own dimensions,
+        background, text boxes and images.  Soft covers omit the inner flaps.
+        """
+        cover_elem = self.book_objects.find('HardCover')
+        self.cover_type = 'hard'
+        if cover_elem is None:
+            cover_elem = self.book_objects.find('SoftCover')
+            self.cover_type = 'soft'
+        if cover_elem is None:
+            self.cover = None
+            self.cover_type = None
+            return
+
+        parts = []
+        pages = cover_elem.find('pagesList')
+        for pg in pages.findall('pages'):
+            cid = pg.attrib['id']
+            matches = self.book_objects.findall("CoverPage[@id='%s']" % cid)
+            if not matches:
+                continue
+            cp = matches[0]
+
+            title = cp.attrib.get('title', '')
+            if self.cover_type == 'soft' and 'Flap' in title:
+                continue # soft covers have no flaps
+
+            bgdef = cp.find('BackgroundDefinition')
+            bgcolor = PageStyle(bgdef.attrib).bgcolor if bgdef is not None else '#ffffff'
+
+            part = CoverPart(title, float(cp.attrib['w']), float(cp.attrib['h']),
+                             bgcolor)
+            part.text_boxes = self._read_text_boxes(cid, 0)
+            part.images = self._read_images(cid, 0)
+            parts.append(part)
+
+        self.cover = parts
 
 
 

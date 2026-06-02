@@ -128,7 +128,7 @@ def process_odt_pages(bodf, bs, **kwargs):
             frame_no +=1
 
         print ('fixing dpi and cropping...', end='')
-        odfbuild.prepare_images(bs, page, **kwargs)
+        odfbuild.prepare_images(bs.images[page], **kwargs)
 
         print ('image boxes...', end='')
         for ib in bs.images[page]:
@@ -264,7 +264,7 @@ def process_odg_pages(bodf, bs, **kwargs):
                     frame_no += 1
 
         print ('fixing dpi and cropping...', end='')
-        odfbuild.prepare_images(bs, page, **kwargs)
+        odfbuild.prepare_images(bs.images[page], **kwargs)
 
         print ('image boxes...', end='')
         for ib in bs.images[page]:
@@ -281,6 +281,157 @@ def process_odg_pages(bodf, bs, **kwargs):
         print ('done.')
 
 
+# print-wrap order of cover parts, left to right (outside facing up)
+COVER_PRINT_ORDER = ['Back Flap', 'Back Cover', 'Spine', 'Front Cover', 'Front Flap']
+
+
+def cover_spread(bs):
+    """Return (ordered_parts, total_width, height) for the print-wrap spread."""
+    def order(part):
+        try:
+            return COVER_PRINT_ORDER.index(part.title)
+        except ValueError:
+            return len(COVER_PRINT_ORDER) # unrecognized parts go last, in list order
+    parts = sorted(bs.cover, key=order)
+    total_width = sum(p.width for p in parts)
+    height = max(p.height for p in parts)
+    return parts, total_width, height
+
+
+def setup_cover(bodf, bs, fmt):
+    odfbuild.emit_metadata(bodf, bs)
+
+    parts, total_width, height = cover_spread(bs)
+
+    # one page layout sized to the whole spread
+    sp_l = Element(ns('style:page-layout'))
+    sp_l.attrib[ns('style:name')] = 'Mcover'
+    sp_l_p = Element(ns('style:page-layout-properties'))
+    sp_l_p.attrib[ns('fo:margin')] = '0pt'
+    sp_l_p.attrib[ns('fo:page-width')] = '%fpt' % total_width
+    sp_l_p.attrib[ns('fo:page-height')] = '%fpt' % height
+    if total_width > height:
+        sp_l_p.attrib[ns('style:print-orientation')] = 'landscape'
+    else:
+        sp_l_p.attrib[ns('style:print-orientation')] = 'portrait'
+    sp_l.append(sp_l_p)
+    bodf.styles.automatic_styles.xmlnode.append(sp_l)
+
+    if fmt == 'odg':
+        dp = Element(ns('style:style'))
+        dp.attrib[ns('style:family')] = 'drawing-page'
+        dp.attrib[ns('style:name')] = 'dpcover'
+        dp_p = Element(ns('style:drawing-page-properties'))
+        dp_p.attrib[ns('draw:fill')] = 'none'
+        dp.append(dp_p)
+        bodf.styles.automatic_styles.xmlnode.append(dp)
+
+    sm_p = Element(ns('style:master-page'))
+    sm_p.attrib[ns('style:name')] = 'cover'
+    sm_p.attrib[ns('style:page-layout-name')] = 'Mcover'
+    if fmt == 'odg':
+        sm_p.attrib[ns('draw:style-name')] = 'dpcover'
+    bodf.styles.master_styles.xmlnode.append(sm_p)
+
+    # default master page (used by the single ODT page)
+    sm_p = Element(ns('style:master-page'))
+    sm_p.attrib[ns('style:name')] = 'Standard'
+    sm_p.attrib[ns('style:page-layout-name')] = 'Mcover'
+    bodf.styles.master_styles.xmlnode.append(sm_p)
+
+    odfbuild.emit_text_styles(bodf, bs)
+    odfbuild.emit_frame_styles(bodf, fill_none=(fmt == 'odg'))
+
+
+def process_cover(bodf, bs, fmt, **kwargs):
+    print ("Converting cover...")
+
+    parts, total_width, height = cover_spread(bs)
+    booksmart_dir = kwargs.get('booksmart_dir')
+    border_images = set()
+    frame_no = 0
+    page_item_count = 0
+
+    if fmt == 'odg':
+        # office:drawing must contain only draw:page children
+        for child in list(bodf.body.xmlnode):
+            bodf.body.xmlnode.remove(child)
+        draw_page = Element(ns('draw:page'))
+        draw_page.attrib[ns('draw:name')] = 'cover'
+        draw_page.attrib[ns('draw:master-page-name')] = 'cover'
+        draw_page.attrib[ns('draw:style-name')] = 'dpcover'
+        attach = draw_page.append
+        pageno, layer, flatten = None, 'layout', True
+    else:
+        bodf.body.xmlnode.append(Element(ns('text:p')))
+        attach = lambda el: bodf.body.xmlnode.insert(2, el)
+        pageno, layer, flatten = 0, None, False
+
+    x_off = 0
+    for part in parts:
+        print ('%s...' % part.title, end='')
+
+        # per-part background rectangle (lowest in the part's stack)
+        attach(odfbuild.build_bg_rect(bodf, x_off, 0, part.width, part.height,
+                                      part.bgcolor, frame_no, page_item_count,
+                                      pageno=pageno, layer=layer))
+        page_item_count += 1
+        frame_no += 1
+
+        odfbuild.prepare_images(part.images, **kwargs)
+        for ib in part.images:
+            attach(odfbuild.build_image(
+                bodf, ib, frame_no, page_item_count, pageno=pageno,
+                link_images=kwargs.get('link_images', False),
+                book_path=bs.book_path, layer=layer, flatten=flatten,
+                x_offset=x_off))
+            page_item_count += 1
+            frame_no += 1
+
+        for tb in part.text_boxes:
+            top_spec = bot_spec = None
+            pad_top = pad_bottom = 0
+            if fmt == 'odg' and tb.border and booksmart_dir:
+                top_spec, bot_spec = odfborder.resolve_edges(tb.border)
+                if top_spec:
+                    size = odfborder.edge_image_size(top_spec, booksmart_dir)
+                    if size:
+                        pad_top = size[1]
+                if bot_spec:
+                    size = odfborder.edge_image_size(bot_spec, booksmart_dir)
+                    if size:
+                        pad_bottom = size[1]
+
+            outer_frame, frame_no = odfbuild.build_textbox(
+                bodf, tb, frame_no, page_item_count, pageno=pageno,
+                booksmart_dir=booksmart_dir, tempdir=kwargs['tempdir'],
+                border_images=border_images, layer=layer,
+                include_borders=(fmt != 'odg'), pad_top=pad_top,
+                pad_bottom=pad_bottom, x_offset=x_off)
+            attach(outer_frame)
+            page_item_count += 1
+            frame_no += 1
+
+            if fmt == 'odg':
+                for spec, is_top in ((top_spec, True), (bot_spec, False)):
+                    if not spec:
+                        continue
+                    bf = odfborder.make_edge_frame(
+                        bodf, spec, tb, is_top, frame_no, booksmart_dir,
+                        kwargs['tempdir'], border_images, page_item_count,
+                        layer=layer, x_offset=x_off)
+                    if bf is not None:
+                        attach(bf)
+                        page_item_count += 1
+                        frame_no += 1
+
+        x_off += part.width
+
+    if fmt == 'odg':
+        bodf.body.xmlnode.append(draw_page)
+    print ('done.')
+
+
 if __name__ == "__main__":
     import tempfile
     import argparse
@@ -294,6 +445,8 @@ if __name__ == "__main__":
                            help='Crop the images stored in the zip file, rather than just zoom and soft crop them. Leaves original image files alone.')
     argparser.add_argument('-b','--booksmart-dir', type=str,
                            help='Path to the BookSmart3 program directory. Required to render decorative text-box borders (the ornament images live encrypted under resources/themes/library). If omitted, borders are skipped.')
+    argparser.add_argument('--cover', action='store_true',
+                           help='Convert the book cover (as its own combined-spread file) instead of the book body. The cover is normally submitted to the publisher as a separate PDF.')
 
     argparser.add_argument('book_file', type=str, help='book file to convert.')
 
@@ -304,6 +457,8 @@ if __name__ == "__main__":
 
     if args.output:
         odffile = args.output
+    elif args.cover:
+        odffile = os.path.splitext(bookfile)[0] + ' cover.' + args.format
     else:
         odffile = os.path.splitext(bookfile)[0] + '.' + args.format
 
@@ -322,7 +477,13 @@ if __name__ == "__main__":
     print ('Pages: %d' % len(bs.pages))
 
     with  tempfile.TemporaryDirectory(prefix='bookxml') as tempdir:
-        if args.format == 'odg':
+        if args.cover:
+            if not bs.cover:
+                sys.exit('This book has no cover to convert.')
+            setup_cover(bodf, bs, args.format)
+            process_cover(bodf, bs, args.format, tempdir=tempdir,
+                          crop_images=args.crop, booksmart_dir=args.booksmart_dir)
+        elif args.format == 'odg':
             setup_odg(bodf, bs)
             process_odg_pages(bodf, bs, tempdir=tempdir, crop_images=args.crop,
                               booksmart_dir=args.booksmart_dir)
