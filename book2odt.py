@@ -285,23 +285,31 @@ def process_odg_pages(bodf, bs, **kwargs):
 COVER_PRINT_ORDER = ['Back Flap', 'Back Cover', 'Spine', 'Front Cover', 'Front Flap']
 
 
-def cover_spread(bs):
-    """Return (ordered_parts, total_width, height) for the print-wrap spread."""
+def cover_spread(bs, no_flaps=False):
+    """Return (ordered_parts, total_width, height) for the print-wrap spread.
+
+    With ``no_flaps`` the inner flap parts are dropped (for wrapped hardcover or
+    softcover output), shrinking the spread accordingly.
+    """
+    parts = bs.cover
+    if no_flaps:
+        parts = [p for p in parts if 'Flap' not in p.title]
+
     def order(part):
         try:
             return COVER_PRINT_ORDER.index(part.title)
         except ValueError:
             return len(COVER_PRINT_ORDER) # unrecognized parts go last, in list order
-    parts = sorted(bs.cover, key=order)
+    parts = sorted(parts, key=order)
     total_width = sum(p.width for p in parts)
     height = max(p.height for p in parts)
     return parts, total_width, height
 
 
-def setup_cover(bodf, bs, fmt):
+def setup_cover(bodf, bs, fmt, no_flaps=False):
     odfbuild.emit_metadata(bodf, bs)
 
-    parts, total_width, height = cover_spread(bs)
+    parts, total_width, height = cover_spread(bs, no_flaps)
 
     # one page layout sized to the whole spread
     sp_l = Element(ns('style:page-layout'))
@@ -343,10 +351,10 @@ def setup_cover(bodf, bs, fmt):
     odfbuild.emit_frame_styles(bodf, fill_none=(fmt == 'odg'))
 
 
-def process_cover(bodf, bs, fmt, **kwargs):
+def process_cover(bodf, bs, fmt, no_flaps=False, **kwargs):
     print ("Converting cover...")
 
-    parts, total_width, height = cover_spread(bs)
+    parts, total_width, height = cover_spread(bs, no_flaps)
     booksmart_dir = kwargs.get('booksmart_dir')
     border_images = set()
     frame_no = 0
@@ -455,6 +463,8 @@ if __name__ == "__main__":
                            help='Path to the BookSmart3 program directory. Required to render decorative text-box borders (the ornament images live encrypted under resources/themes/library). If omitted, borders are skipped.')
     argparser.add_argument('--cover', action='store_true',
                            help='Convert the book cover (as its own combined-spread file) instead of the book body. The cover is normally submitted to the publisher as a separate PDF.')
+    argparser.add_argument('--no-flaps', action='store_true',
+                           help='With --cover, omit the inner flaps (if present) from the spread, producing a cover for a wrapped hardcover or a softcover. The resulting cover dimensions exclude the flaps.')
 
     argparser.add_argument('book_file', type=str, help='book file to convert.')
 
@@ -488,9 +498,10 @@ if __name__ == "__main__":
         if args.cover:
             if not bs.cover:
                 sys.exit('This book has no cover to convert.')
-            setup_cover(bodf, bs, args.format)
-            process_cover(bodf, bs, args.format, tempdir=tempdir,
-                          crop_images=args.crop, booksmart_dir=args.booksmart_dir)
+            setup_cover(bodf, bs, args.format, no_flaps=args.no_flaps)
+            process_cover(bodf, bs, args.format, no_flaps=args.no_flaps,
+                          tempdir=tempdir, crop_images=args.crop,
+                          booksmart_dir=args.booksmart_dir)
         elif args.format == 'odg':
             setup_odg(bodf, bs)
             process_odg_pages(bodf, bs, tempdir=tempdir, crop_images=args.crop,

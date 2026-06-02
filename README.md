@@ -5,10 +5,10 @@ documents that you can open and edit in LibreOffice — either **ODT**
 (LibreOffice Writer) or **ODG** (LibreOffice Draw).
 
 Blurb's BookSmart application is long discontinued. This script lets you recover
-the contents of your old books — text, styles, images, and decorative text-box
-borders — into an open, editable format.
+the contents of your old books, including full text, styles, images, decorative text-box
+borders, and the cover, into an open, editable format.
 
-Only tested with the author's own photo books.
+Note I have only tested this with my own photo books.  You may have to do manual editing to everything correct.
 
 ## Usage
 
@@ -38,8 +38,34 @@ Point it at the `.book` file inside your BookSmart data folder, e.g.:
   required to render decorative text-box borders, because the border ornament
   images live there encrypted as `.bev` files and must be decrypted at
   conversion time. If omitted, borders are simply skipped.
+- `--cover` — convert the book's **cover** instead of the body (see below).
+- `--no-flaps` — with `--cover`, omit the inner flaps from the spread (see
+  below).
 
 Run `./book2odt.py --help` for the authoritative list.
+
+## Cover
+
+The cover should be laid out in its own file. Pass `--cover` to convert the cover instead of the book body:
+
+```
+./book2odt.py --cover "~/BookSmartData/my book/my book.book"
+```
+
+This writes `<book> cover.<ext>` next to the `.book` file (override with `-o`),
+and honours `-f/--format` like the body. All cover parts are placed on a single
+combined spread page in print-wrap order, left to right:
+
+```
+Back Flap | Back Cover | Spine | Front Cover | Front Flap
+```
+
+Each part keeps its own background and dimensions, and the page is sized to the
+whole spread. Spine text is rotated to read down the spine.
+
+For a **wrapped hardcover or a softcover**, add `--no-flaps` to leave the inner
+flaps off the spread; the resulting cover's dimensions are reduced accordingly
+(soft covers have no flaps to begin with, so the flag is a no-op there).
 
 ## ODT vs. ODG
 
@@ -65,7 +91,6 @@ fixed layout.
 
 This script aims for a faithful reproduction, but it is not perfect:
 
-- **The book's cover is not converted yet.**
 - **Typography and positioning may not be exactly right.** Fonts, spacing, and
   the precise placement of elements can differ from BookSmart's rendering.
 - **Image zoom and cropping are reproduced as set in BookSmart,** but depending
