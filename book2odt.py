@@ -7,45 +7,17 @@ from lxml.etree import QName, Element
 import bookxml
 import odfcommon
 import odfborder
+import odfbuild
+from odfbuild import ns
 
-def ns(combined_name):
-    prefix,name = combined_name.split(':')
-    return "{%s}%s" % (ALL_NSMAP[prefix], name)
-
-def create_frame(pageno, frameno, x,y, width, height, zindex, transparent=False):
-    draw_frame = Element(ns('draw:frame'))
-    draw_frame.attrib[ns('draw:name')] = 'Frame%d' % (frameno)
-    if transparent:
-        draw_frame.attrib[ns('draw:style-name')] = 'OuterFrameTextStyle'
-    else:
-        draw_frame.attrib[ns('draw:style-name')] = 'OuterFrameImageStyle'
-    draw_frame.attrib[ns('svg:width')] = '%dpt' % width
-    draw_frame.attrib[ns('svg:height')] = '%dpt' % height
-    draw_frame.attrib[ns('svg:x')] = '%dpt' % x
-    draw_frame.attrib[ns('svg:y')] = '%dpt' % y
-    draw_frame.attrib[ns('text:anchor-type')] = 'page'
-    draw_frame.attrib[ns('text:anchor-page-number')] = '%d' % (pageno + 1)
-    draw_frame.attrib[ns('draw:z-index')] = '%d' % (zindex + 1)
-
-    return draw_frame
 
 def setup_odt(bodf, bs):
     # set up metadata
-    e = Element(ns('dc:creator'))
-    if 'authorname' in bs.info:
-        e.text = bs.info['authorname']
-    else:
-        e.text = ''
-    bodf.meta.meta.append(e)
-    e = Element(ns('dc:title'))
-    e.text = bs.info['booktitle']
-    bodf.meta.meta.append(e)
+    odfbuild.emit_metadata(bodf, bs)
 
     # set up page styles
-    #print (bs.width, bs.height)
     print ("Writing page styles.")
     for page_style in bs.get_page_styles():
-        #print (page_style)
         sp_l = Element(ns('style:page-layout'))
         sp_l.attrib[ns('style:name')] = 'M%s' % page_style['name']
 
@@ -99,153 +71,11 @@ def setup_odt(bodf, bs):
     sm_p.attrib[ns('style:page-layout-name')] = "M%s" % bs.page_info[bs.pages[0]]['page_style']
     bodf.styles.master_styles.xmlnode.append(sm_p)
 
-    # Fonts entries
-    for font in bs.fonts:
-        ss_f = Element(ns('style:font-face'))
-        ss_f.attrib[ns('style:name')] = font
-        ss_f.attrib[ns('svg:font-family')] = font
-        
-        bodf.styles.fonts.xmlnode.append(ss_f)
-
-        ss_f = Element(ns('style:font-face'))
-        ss_f.attrib[ns('style:name')] = font
-        ss_f.attrib[ns('svg:font-family')] = font
-        bodf.content.fonts.xmlnode.append(ss_f)
-        
-    # Paragraph Styles
-    print ("Writing paragraph styles.")
-
-    for ps in bs.get_paragraph_styles():
-        ss = Element(ns('style:style'))
-        ss.attrib[ns('style:family')] = 'paragraph'
-        ss.attrib[ns('style:name')] = ps['name']
-
-        sp_p = Element(ns('style:paragraph-properties'))
-        sp_p.attrib[ns('fo:text-align')] = bookxml.ParagraphStyle.ALIGN[ps['alignment']]
-        sp_p.attrib[ns('style:justify-single-word')] = 'false'
-        #print ((ps['line_spacing']+1) * 100 )
-        sp_p.attrib[ns('fo:line-height')] = '%d%%' % ((ps['line_spacing'] + 1) * 100)
-        sp_p.attrib[ns('fo:margin-left')] = '%dpt' % ps['left_indent']
-
-        ss.append(sp_p)
-
-        st_p = Element(ns('style:text-properties'))
-        if ps['bold']:
-            st_p.attrib[ns('fo:font-weight')] = 'bold'
-        if ps['italic']:
-            st_p.attrib[ns('fo:font-style')] = 'italic'
-        if ps['underline']:
-            st_p.attrib[ns('style:text-underline-color')] = 'font-color'
-            st_p.attrib[ns('style:text-underline-style')] = 'solid'
-            st_p.attrib[ns('style:text-underline-width')] = 'auto'
-
-        st_p.attrib[ns('fo:font-size')] = '%spt' % ps['size']
-        st_p.attrib[ns('style:font-name')] = ps['font']
-        if ps['color']:
-            st_p.attrib[ns('fo:color')] = ps['color']
-
-        ss.append(st_p)
-
-        bodf.content.automatic_styles.xmlnode.append(ss)
+    odfbuild.emit_text_styles(bodf, bs)
+    odfbuild.emit_frame_styles(bodf)
 
 
-
-
-    # Span Styles
-    print ("Writing text styles.")
-    for ts in bs.get_span_styles():
-        #print (ts)
-        ss = Element(ns('style:style'))
-        ss.attrib[ns('style:family')] = 'text'
-        ss.attrib[ns('style:name')] = ts['name']
-
-        st_p = Element(ns('style:text-properties'))
-        if ts['bold']:
-            st_p.attrib[ns('fo:font-weight')] = 'bold'
-        if ts['italic']:
-            st_p.attrib[ns('fo:font-style')] = 'italic'
-        if ts['underline']:
-            st_p.attrib[ns('style:text-underline-color')] = 'font-color'
-            st_p.attrib[ns('style:text-underline-style')] = 'solid'
-            st_p.attrib[ns('style:text-underline-width')] = 'auto'
-
-        if ts['size'] is not None:
-            st_p.attrib[ns('fo:font-size')] = '%spt' % ts['size']
-        if ts['font']:
-            st_p.attrib[ns('style:font-name')] = ts['font']
-        if ts['color']:
-            st_p.attrib[ns('fo:color')] = ts['color']
-
-
-        ss.append(st_p)
-
-        bodf.content.automatic_styles.xmlnode.append(ss)
-
-    # LibreOffice Default Frame style
-    style_style = Element(ns('style:style'))
-    style_style.attrib[ns('style:family')] = 'graphic'
-    style_style.attrib[ns('style:name')] = 'Frame'
-
-    graphic_properties = Element(ns('style:graphic-properties'))
-    graphic_properties.attrib[ns('fo:border')] = '0.06pt solid #000000'
-    graphic_properties.attrib[ns('fo:margin-bottom')] = '0.0791in'
-    graphic_properties.attrib[ns('fo:margin-top')] = '0.0791in'
-    graphic_properties.attrib[ns('fo:margin-left')] = '0.0591in'
-    graphic_properties.attrib[ns('fo:margin-right')] = '0.0591in'
-    graphic_properties.attrib[ns('fo:padding')] = '0.0591n'
-    graphic_properties.attrib[ns('style:horizontal-pos')] = 'center'
-    graphic_properties.attrib[ns('style:vertical-pos')] = 'top'
-    graphic_properties.attrib[ns('style:vertical-rel')] = 'paragraph-content'
-    graphic_properties.attrib[ns('style:horizontal-rel')] = 'paragaph-content'
-    graphic_properties.attrib[ns('style:wrap')] = 'parallel'
-
-
-    # Outer frame style
-    style_style = Element(ns('style:style'))
-    style_style.attrib[ns('style:family')] = 'graphic'
-    style_style.attrib[ns('style:name')] = 'OuterFrameImageStyle'
-    style_style.attrib[ns('style:parent-style-name')] = 'Frame'
-
-    graphic_properties = Element(ns('style:graphic-properties'))
-    graphic_properties.attrib[ns('fo:border')] = 'none'
-    graphic_properties.attrib[ns('fo:margin-bottom')] = '0in'
-    #graphic_properties.attrib[ns('fo:margin-top')] = '0in'
-    #graphic_properties.attrib[ns('fo:margin-left')] = '0in'
-    #graphic_properties.attrib[ns('fo:margin-right')] = '0in'
-    graphic_properties.attrib[ns('fo:padding')] = '0in'
-    graphic_properties.attrib[ns('style:horizontal-pos')] = 'from-left'
-    graphic_properties.attrib[ns('style:vertical-pos')] = 'from-top'
-    graphic_properties.attrib[ns('style:vertical-rel')] = 'page'
-    graphic_properties.attrib[ns('style:horizontal-rel')] = 'page'
-    graphic_properties.attrib[ns('style:wrap')] = 'run-through'
-
-    style_style.append(graphic_properties)
-    bodf.content.automatic_styles.xmlnode.append(style_style)
-
-    # Outer frame transparent style
-    style_style = Element(ns('style:style'))
-    style_style.attrib[ns('style:family')] = 'graphic'
-    style_style.attrib[ns('style:name')] = 'OuterFrameTextStyle'
-    style_style.attrib[ns('style:parent-style-name')] = 'Frame'
-
-    graphic_properties = Element(ns('style:graphic-properties'))
-    graphic_properties.attrib[ns('fo:border')] = 'none'
-    graphic_properties.attrib[ns('fo:margin-bottom')] = '0in'
-    #graphic_properties.attrib[ns('fo:margin-top')] = '0in'
-    #graphic_properties.attrib[ns('fo:margin-left')] = '0in'
-    #graphic_properties.attrib[ns('fo:margin-right')] = '0in'
-    graphic_properties.attrib[ns('fo:padding')] = '0in'
-    graphic_properties.attrib[ns('style:horizontal-pos')] = 'from-left'
-    graphic_properties.attrib[ns('style:vertical-pos')] = 'from-top'
-    graphic_properties.attrib[ns('style:vertical-rel')] = 'page'
-    graphic_properties.attrib[ns('style:horizontal-rel')] = 'page'
-    graphic_properties.attrib[ns('style:wrap')] = 'run-through'
-    graphic_properties.attrib[ns('draw:opacity')] = '0%'
-
-
-    style_style.append(graphic_properties)
-    bodf.content.automatic_styles.xmlnode.append(style_style)
-def process_odt_pages(bodt, bs, **kwargs):
+def process_odt_pages(bodf, bs, **kwargs):
     #process pages
     print ("Converting pages...")
 
@@ -253,12 +83,10 @@ def process_odt_pages(bodt, bs, **kwargs):
     booksmart_dir = kwargs.get('booksmart_dir')
     border_images = set() # image stems already embedded for borders
 
-    #for page_no, page in enumerate([ bs.pages[1] ]):
     for page_no, page in enumerate(bs.pages):
         page_item_count = 0
 
         print ("Page %d... " % (page_no+1),end='')
-        #print (bs.page_info[page])
 
         if page_no > 0:
             # emit a page break
@@ -288,174 +116,170 @@ def process_odt_pages(bodt, bs, **kwargs):
         bodf.body.xmlnode.append(p)
 
         # Text boxes
-
         print ('text boxes...', end='')
         for tb in bs.text_boxes[page]:
-            #create a transparent frame so text can live on top of images (if the z thing is right)
-            outer_frame = create_frame(page_no, frame_no, tb.x, tb.y, 
-                                       tb.width, tb.height, page_item_count,
-                                       transparent = True)
-
-            bodf.body.xmlnode.insert(2,outer_frame)
-
-            dtb = Element(ns('draw:text-box'))
-            dtb.attrib[ns('fo:max-height')] = '%dpt' % tb.height
-
-            outer_frame.append(dtb)
-
-            # decorative border ornaments flow with the text: top above, bottom
-            # below (the bottom moves down as the text grows)
-            top_spec = bot_spec = None
-            if tb.border and booksmart_dir:
-                top_spec, bot_spec = odfborder.resolve_edges(tb.border)
-
-            if top_spec:
-                bp = odfborder.make_edge_paragraph(bodf, top_spec, tb.border,
-                                                   True, frame_no, booksmart_dir,
-                                                   kwargs['tempdir'], border_images)
-                if bp is not None:
-                    dtb.append(bp)
-                    frame_no += 1
-
-            for p in tb.paragraphs:
-                paragraph = Element(ns('text:p'))
-                if p.style:
-                    paragraph.attrib[ns('text:style-name')] = p.style
-
-                for s in p.spans:
-                    if s.variable and not s.text.strip():
-                        continue
-
-                    span = Element(ns('text:span'))
-                    if s.style:
-                        span.attrib[ns('text:style-name')] = s.style
-
-                    if s.variable == '$PageNumber':
-                        span.append(Element(ns('text:page-number')))
-                    elif s.variable == '$BookTitle':
-                        span.append(Element(ns('text:title')))
-                    else:
-                        span.text = s.text
-                    paragraph.append(span)
-                dtb.append(paragraph)
-
-            if bot_spec:
-                bp = odfborder.make_edge_paragraph(bodf, bot_spec, tb.border,
-                                                   False, frame_no, booksmart_dir,
-                                                   kwargs['tempdir'], border_images)
-                if bp is not None:
-                    dtb.append(bp)
-                    frame_no += 1
+            outer_frame, frame_no = odfbuild.build_textbox(
+                bodf, tb, frame_no, page_item_count, pageno=page_no,
+                booksmart_dir=booksmart_dir, tempdir=kwargs['tempdir'],
+                border_images=border_images)
+            bodf.body.xmlnode.insert(2, outer_frame)
 
             page_item_count +=1
             frame_no +=1
 
         print ('fixing dpi and cropping...', end='')
-        for ib in bs.images[page]:
-            # if we're just linking the images, and if the image
-            # requires its DPI adjusted, the default is to 
-            # make a copy in the same folder as it came from, fix
-            # the DPI there, and then link to that. Optionally we
-            # can fix the DPI in place, permanently modifying the
-            # original image.
-            if kwargs.get('link_images'):
-                if kwargs.get('fix_in_place'):
-                    save_disk = bookxml.ImageBox.OVERWRITE
-                else:
-                    save_disk = bookxml.ImageBox.SAVEASCOPY
-                ib.fix_dpi(save_disk, **kwargs)
-            elif kwargs.get('crop_images'):
-                ib.crop_file()
-            else:
-                ib.fix_dpi(**kwargs)
-
-            ib.calculate_crop()
+        odfbuild.prepare_images(bs, page, **kwargs)
 
         print ('image boxes...', end='')
-        
         for ib in bs.images[page]:
-            outer_frame = create_frame(page_no, frame_no, ib.box_x, ib.box_y, ib.width, ib.height, page_item_count)
-            bodf.body.xmlnode.insert(2,outer_frame)
-
-            # style to set up the image crop
-            style_style = Element(ns('style:style'))
-            style_style.attrib[ns('style:name')] = 'imageframe%d' % frame_no
-            style_style.attrib[ns('style:family')] = 'graphic'
-            style_style.attrib[ns('style:parent-style-name')] = 'Graphics'
-            bodf.content.automatic_styles.xmlnode.append(style_style)
-
-            style_graphic_properties = Element(ns('style:graphic-properties'))
-
-            #TODO: if image itself is to be cropped in the zip bundle, set this rect to 0s
-            style_graphic_properties.attrib[ns('fo:clip')] = \
-                     'rect(%fin, %fin, %fin, %fin)' % (ib.crop_top, 
-                                                       ib.crop_right, 
-                                                       ib.crop_bottom, 
-                                                       ib.crop_left)
-            style_graphic_properties.attrib[ns('draw:luminance')] = '0%'
-            style_graphic_properties.attrib[ns('draw:contrast')] = '0%'
-            style_graphic_properties.attrib[ns('draw:red')] = '0%'
-            style_graphic_properties.attrib[ns('draw:green')] = '0%'
-            style_graphic_properties.attrib[ns('draw:blue')] = '0%'
-            style_graphic_properties.attrib[ns('draw:gamma')] = '100%'
-            style_graphic_properties.attrib[ns('draw:color-inversion')] = 'false'
-            style_graphic_properties.attrib[ns('draw:image-opacity')] = '100%'
-            style_graphic_properties.attrib[ns('draw:color-mode')] = 'standard'
-            if ib.vflip and ib.hflip:
-                style_graphic_properties.attrib[ns('style:mirror')] = 'horizontal vertical'
-            elif ib.vflip:
-                style_graphic_properties.attrib[ns('style:mirror')] = 'vertical'
-            elif ib.hflip:
-                style_graphic_properties.attrib[ns('style:mirror')] = 'horizontal'
-            style_style.append(style_graphic_properties)
-
-            # place image at x,y, set display width and height
-            # sub-frame around graphic so we can position image properly within the
-            # frame. This is to emulate the way Booksmart allows placing of images,
-            # zooming, panning, etc
-            draw_text_subbox = Element(ns('draw:text-box'))
-            draw_text_subbox.attrib[ns('fo:max-height')] = '%dpt' % ib.height
-            outer_frame.append(draw_text_subbox)
-
-            draw_subframe = Element(ns('draw:frame'))
-            draw_subframe.attrib[ns('draw:name')] = 'ImageFrame%d' % (frame_no)
-            draw_subframe.attrib[ns('draw:style-name')] = 'imageframe%d' % frame_no
-            draw_subframe.attrib[ns('svg:width')] = '%dpt' % ib.width
-            draw_subframe.attrib[ns('svg:height')] = '%dpt' % ib.height
-            draw_subframe.attrib[ns('svg:x')] = '%dpt' % ib.x
-            draw_subframe.attrib[ns('svg:y')] = '%dpt' % ib.y
-            draw_subframe.attrib[ns('text:anchor-type')] = 'frame'
-
-            draw_text_subbox.append(draw_subframe)
-
-            draw_image = Element(ns('draw:image'))
-
-            if kwargs.get('link_images', False):
-                # NOTE: Due to a long-standing bug in LibreOffice, DPI is not read from
-                # linked image files, so using non-destructive cropping (preserving
-                # original image files) does not work at all.  Effectively makes linking
-                # images useless for our purposes.
-
-                # embedding, calculate path
-                image_path = '..' + ib.filename[len(bs.book_path):]
-            else:
-                # create odf image to embed in zip file.  self registers
-                # TODO if desired, crop image
-                odf_image = odfcommon.ODFImageObject(bodf, ib.filename, ib.format)
-                image_path = 'Pictures/' + os.path.basename(ib.filename)
-
-            draw_image.attrib[ns('xlink:href')] = image_path
-            draw_image.attrib[ns('xlink:type')] = 'simple'
-            draw_image.attrib[ns('xlink:show')] = 'embed'
-            draw_image.attrib[ns('xlink:actuate')] = 'onLoad'
-            #draw_image.attrib[ns('loext:mime-type')] = 'image/%s' % (img.format.lower())
-
-            draw_subframe.append(draw_image)
-    
+            outer_frame = odfbuild.build_image(
+                bodf, ib, frame_no, page_item_count, pageno=page_no,
+                link_images=kwargs.get('link_images', False),
+                book_path=bs.book_path)
+            bodf.body.xmlnode.insert(2, outer_frame)
 
             page_item_count +=1
             frame_no +=1
         print ('done.')
+
+
+def setup_odg(bodf, bs):
+    # set up metadata
+    odfbuild.emit_metadata(bodf, bs)
+
+    # set up page styles: each distinct BookSmart page style becomes a master
+    # page (sized page-layout + a drawing-page style carrying the background)
+    print ("Writing page styles.")
+    for page_style in bs.get_page_styles():
+        sp_l = Element(ns('style:page-layout'))
+        sp_l.attrib[ns('style:name')] = 'M%s' % page_style['name']
+
+        sp_l_p = Element(ns('style:page-layout-properties'))
+        sp_l_p.attrib[ns('fo:margin')] = '0pt'
+        sp_l_p.attrib[ns('fo:page-height')] = '%fpt' % bs.height
+        sp_l_p.attrib[ns('fo:page-width')] = '%fpt' % bs.width
+
+        if (bs.width > bs.height):
+            sp_l_p.attrib[ns('style:print-orientation')] = 'landscape'
+        else:
+            sp_l_p.attrib[ns('style:print-orientation')] = 'portrait'
+
+        sp_l.append(sp_l_p)
+        bodf.styles.automatic_styles.xmlnode.append(sp_l)
+
+        # drawing-page style holds the page background colour
+        dp = Element(ns('style:style'))
+        dp.attrib[ns('style:family')] = 'drawing-page'
+        dp.attrib[ns('style:name')] = 'dp%s' % page_style['name']
+        dp_p = Element(ns('style:drawing-page-properties'))
+        if page_style['bgcolor'] != '#ffffff':
+            dp_p.attrib[ns('draw:fill')] = 'solid'
+            dp_p.attrib[ns('draw:fill-color')] = page_style['bgcolor']
+        else:
+            dp_p.attrib[ns('draw:fill')] = 'none'
+        dp.append(dp_p)
+        bodf.styles.automatic_styles.xmlnode.append(dp)
+
+        sm_p = Element(ns('style:master-page'))
+        sm_p.attrib[ns('style:name')] = page_style['name']
+        sm_p.attrib[ns('style:page-layout-name')] = 'M%s' % page_style['name']
+        sm_p.attrib[ns('draw:style-name')] = 'dp%s' % page_style['name']
+        bodf.styles.master_styles.xmlnode.append(sm_p)
+
+    # default master page
+    sm_p = Element(ns('style:master-page'))
+    sm_p.attrib[ns('style:name')] = 'Standard'
+    sm_p.attrib[ns('style:page-layout-name')] = "M%s" % bs.page_info[bs.pages[0]]['page_style']
+    bodf.styles.master_styles.xmlnode.append(sm_p)
+
+    odfbuild.emit_text_styles(bodf, bs)
+    odfbuild.emit_frame_styles(bodf, fill_none=True)
+
+
+def process_odg_pages(bodf, bs, **kwargs):
+    #process pages
+    print ("Converting pages...")
+
+    frame_no = 0
+    booksmart_dir = kwargs.get('booksmart_dir')
+    border_images = set() # image stems already embedded for borders
+
+    # office:drawing must contain only draw:page children; drop the
+    # text:variable-decls / text:user-field-decls ezodf adds for every body,
+    # and any default page it created.
+    for child in list(bodf.body.xmlnode):
+        bodf.body.xmlnode.remove(child)
+
+    for page_no, page in enumerate(bs.pages):
+        page_item_count = 0
+
+        print ("Page %d... " % (page_no+1),end='')
+
+        draw_page = Element(ns('draw:page'))
+        draw_page.attrib[ns('draw:name')] = 'page%d' % (page_no + 1)
+        draw_page.attrib[ns('draw:master-page-name')] = bs.page_info[page]['page_style']
+        draw_page.attrib[ns('draw:style-name')] = 'dp%s' % bs.page_info[page]['page_style']
+
+        # Text boxes
+        print ('text boxes...', end='')
+        for tb in bs.text_boxes[page]:
+            # Draw can't reserve space for the absolute ornament shapes, so
+            # measure them up front and inset the text box's top/bottom padding
+            # so the text starts below a top ornament / stops above a bottom one.
+            top_spec = bot_spec = None
+            pad_top = pad_bottom = 0
+            if tb.border and booksmart_dir:
+                top_spec, bot_spec = odfborder.resolve_edges(tb.border)
+                if top_spec:
+                    size = odfborder.edge_image_size(top_spec, booksmart_dir)
+                    if size:
+                        pad_top = size[1]
+                if bot_spec:
+                    size = odfborder.edge_image_size(bot_spec, booksmart_dir)
+                    if size:
+                        pad_bottom = size[1]
+
+            outer_frame, frame_no = odfbuild.build_textbox(
+                bodf, tb, frame_no, page_item_count, pageno=None,
+                booksmart_dir=booksmart_dir, tempdir=kwargs['tempdir'],
+                border_images=border_images, layer='layout',
+                include_borders=False, pad_top=pad_top, pad_bottom=pad_bottom)
+            draw_page.append(outer_frame)
+
+            page_item_count +=1
+            frame_no +=1
+
+            # place the border ornaments as separate absolutely-positioned page
+            # shapes (centered on the text box, at the top/bottom edge).
+            for spec, is_top in ((top_spec, True), (bot_spec, False)):
+                if not spec:
+                    continue
+                bf = odfborder.make_edge_frame(
+                    bodf, spec, tb, is_top, frame_no, booksmart_dir,
+                    kwargs['tempdir'], border_images, page_item_count,
+                    layer='layout')
+                if bf is not None:
+                    draw_page.append(bf)
+                    page_item_count += 1
+                    frame_no += 1
+
+        print ('fixing dpi and cropping...', end='')
+        odfbuild.prepare_images(bs, page, **kwargs)
+
+        print ('image boxes...', end='')
+        for ib in bs.images[page]:
+            outer_frame = odfbuild.build_image(
+                bodf, ib, frame_no, page_item_count, pageno=None,
+                link_images=kwargs.get('link_images', False),
+                book_path=bs.book_path, layer='layout', flatten=True)
+            draw_page.append(outer_frame)
+
+            page_item_count +=1
+            frame_no +=1
+
+        bodf.body.xmlnode.append(draw_page)
+        print ('done.')
+
 
 if __name__ == "__main__":
     import tempfile
@@ -463,7 +287,9 @@ if __name__ == "__main__":
 
 
     argparser = argparse.ArgumentParser()
-    argparser.add_argument('-o','--output', type=str, help='write odt to OUTPUT. Default is to write it with the same name as the book in the same folder as the book file.')
+    argparser.add_argument('-o','--output', type=str, help='write the converted document to OUTPUT. Default is to write it with the same name as the book, with the format extension, in the same folder as the book file.')
+    argparser.add_argument('-f','--format', choices=['odt','odg'], default='odt',
+                           help='output format: odt (OpenDocument Text, the default) or odg (OpenDocument Drawing).')
     argparser.add_argument('-c','--crop', action='store_const', const=True,
                            help='Crop the images stored in the zip file, rather than just zoom and soft crop them. Leaves original image files alone.')
     argparser.add_argument('-b','--booksmart-dir', type=str,
@@ -479,12 +305,12 @@ if __name__ == "__main__":
     if args.output:
         odffile = args.output
     else:
-        odffile = os.path.splitext(bookfile)[0] + '.odt'
+        odffile = os.path.splitext(bookfile)[0] + '.' + args.format
 
     print (odffile)
 
     bs = bookxml.BookXML(bookfile)
-    bodf = ezodf.newdoc('odt', odffile)
+    bodf = ezodf.newdoc(args.format, odffile)
 
     print ("Converting %s\n        to %s." % (bookfile, odffile))
 
@@ -496,10 +322,13 @@ if __name__ == "__main__":
     print ('Pages: %d' % len(bs.pages))
 
     with  tempfile.TemporaryDirectory(prefix='bookxml') as tempdir:
-        setup_odt(bodf, bs)
-        process_odt_pages(bodf, bs, tempdir=tempdir, crop_images=args.crop,
-                          booksmart_dir=args.booksmart_dir)
-        #process_odt_pages(bodf, bs)
-        print ('Saving odt file. May take a few minutes to store all the images.')
+        if args.format == 'odg':
+            setup_odg(bodf, bs)
+            process_odg_pages(bodf, bs, tempdir=tempdir, crop_images=args.crop,
+                              booksmart_dir=args.booksmart_dir)
+        else:
+            setup_odt(bodf, bs)
+            process_odt_pages(bodf, bs, tempdir=tempdir, crop_images=args.crop,
+                              booksmart_dir=args.booksmart_dir)
+        print ('Saving %s file. May take a few minutes to store all the images.' % args.format)
         bodf.save()
-

@@ -55,12 +55,23 @@ def resolve_edges(border):
     return top, bot
 
 
-def make_edge_paragraph(bodf, spec, border, is_top, frame_no,
-                        booksmart_dir, tempdir, registered):
-    """Build a centered text:p containing the border ornament image.
+def edge_image_size(spec, booksmart_dir):
+    """Return (width, height) in points of an edge ornament, or None if missing.
 
-    Returns the ``text:p`` Element, or None if the ornament could not be
-    resolved (missing .bev).  Embeds the decrypted SVG once per stem.
+    Used (without embedding) to size text padding around an ODG ornament.
+    """
+    stem, mirrored = spec
+    bev_path = os.path.join(booksmart_dir, 'resources', 'themes', 'library',
+                            stem + '.bev')
+    if not os.path.exists(bev_path):
+        return None
+    return bev.svg_dimensions(bev.decrypt_bev(bev_path))
+
+
+def _embed_edge(bodf, spec, booksmart_dir, tempdir, registered):
+    """Decrypt, (optionally) flip, and embed an ornament SVG once.
+
+    Returns ``(image_name, width, height)`` or None if the .bev is missing.
     """
     stem, mirrored = spec
     library = os.path.join(booksmart_dir, 'resources', 'themes', 'library')
@@ -90,6 +101,21 @@ def make_edge_paragraph(bodf, spec, border, is_top, frame_no,
             f.write(image_bytes)
         odfcommon.ODFImageObject(bodf, svg_path, 'svg+xml')
         registered.add(image_name)
+
+    return image_name, width, height
+
+
+def make_edge_paragraph(bodf, spec, border, is_top, frame_no,
+                        booksmart_dir, tempdir, registered):
+    """Build a centered text:p containing the border ornament image (ODT).
+
+    Returns the ``text:p`` Element, or None if the ornament could not be
+    resolved (missing .bev).  Embeds the decrypted SVG once per stem.
+    """
+    embedded = _embed_edge(bodf, spec, booksmart_dir, tempdir, registered)
+    if embedded is None:
+        return None
+    image_name, width, height = embedded
 
     # paragraph style: center the ornament; no extra spacing so the text
     # immediately follows the top ornament and the bottom ornament immediately
@@ -140,3 +166,55 @@ def make_edge_paragraph(bodf, spec, border, is_top, frame_no,
     paragraph.append(frame)
 
     return paragraph
+
+
+def make_edge_frame(bodf, spec, tb, is_top, frame_no, booksmart_dir,
+                    tempdir, registered, zindex, layer=None):
+    """Build an absolutely-positioned draw:frame for a border ornament (ODG).
+
+    Draw does not render the in-flow ornament that ``make_edge_paragraph``
+    produces, so for ODG the ornament is placed as its own page shape: centered
+    horizontally on the text box, at the top or bottom edge.
+
+    Returns the ``draw:frame`` Element, or None if the .bev is missing.
+    """
+    embedded = _embed_edge(bodf, spec, booksmart_dir, tempdir, registered)
+    if embedded is None:
+        return None
+    image_name, width, height = embedded
+
+    x = tb.x + tb.width / 2.0 - width / 2.0
+    if is_top:
+        y = tb.y
+    else:
+        y = tb.y + tb.height - height
+
+    img_style = 'borderimg%d' % frame_no
+    gs = Element(ns('style:style'))
+    gs.attrib[ns('style:family')] = 'graphic'
+    gs.attrib[ns('style:name')] = img_style
+    gp = Element(ns('style:graphic-properties'))
+    gp.attrib[ns('fo:border')] = 'none'
+    gp.attrib[ns('fo:padding')] = '0in'
+    gs.append(gp)
+    bodf.content.automatic_styles.xmlnode.append(gs)
+
+    frame = Element(ns('draw:frame'))
+    frame.attrib[ns('draw:name')] = 'Border%d' % frame_no
+    frame.attrib[ns('draw:style-name')] = img_style
+    if layer is not None:
+        frame.attrib[ns('draw:layer')] = layer
+    frame.attrib[ns('svg:width')] = '%gpt' % width
+    frame.attrib[ns('svg:height')] = '%gpt' % height
+    frame.attrib[ns('svg:x')] = '%gpt' % x
+    frame.attrib[ns('svg:y')] = '%gpt' % y
+    frame.attrib[ns('draw:z-index')] = '%d' % (zindex + 1)
+
+    image = Element(ns('draw:image'))
+    image.attrib[ns('xlink:href')] = 'Pictures/%s.svg' % image_name
+    image.attrib[ns('xlink:type')] = 'simple'
+    image.attrib[ns('xlink:show')] = 'embed'
+    image.attrib[ns('xlink:actuate')] = 'onLoad'
+    frame.append(image)
+
+    return frame
