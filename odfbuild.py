@@ -177,7 +177,11 @@ def emit_frame_styles(bodf, fill_none=False):
     style_style = Element(ns('style:style'))
     style_style.attrib[ns('style:family')] = 'graphic'
     style_style.attrib[ns('style:name')] = 'OuterFrameImageStyle'
-    style_style.attrib[ns('style:parent-style-name')] = 'Frame'
+    if not fill_none:
+        # 'Frame' is never actually emitted; Writer tolerates the dangling
+        # parent, but Draw discards the style (and our fill) if it can't resolve
+        # the parent, so omit it for ODG.
+        style_style.attrib[ns('style:parent-style-name')] = 'Frame'
 
     graphic_properties = Element(ns('style:graphic-properties'))
     graphic_properties.attrib[ns('fo:border')] = 'none'
@@ -199,7 +203,8 @@ def emit_frame_styles(bodf, fill_none=False):
     style_style = Element(ns('style:style'))
     style_style.attrib[ns('style:family')] = 'graphic'
     style_style.attrib[ns('style:name')] = 'OuterFrameTextStyle'
-    style_style.attrib[ns('style:parent-style-name')] = 'Frame'
+    if not fill_none:
+        style_style.attrib[ns('style:parent-style-name')] = 'Frame'
 
     graphic_properties = Element(ns('style:graphic-properties'))
     graphic_properties.attrib[ns('fo:border')] = 'none'
@@ -248,6 +253,9 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
             tp.attrib[ns('fo:padding-top')] = '%gpt' % pad_top
         if pad_bottom:
             tp.attrib[ns('fo:padding-bottom')] = '%gpt' % pad_bottom
+        # keep the frame transparent in Draw (don't rely on inheritance)
+        tp.attrib[ns('draw:fill')] = 'none'
+        tp.attrib[ns('draw:stroke')] = 'none'
         ts.append(tp)
         bodf.content.automatic_styles.xmlnode.append(ts)
 
