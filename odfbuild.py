@@ -2,8 +2,8 @@
 
 The page/body scaffolding differs between OpenDocument Text (.odt) and Drawing
 (.odg) output, but the styles and the per-box frame content are identical.  Those
-shared pieces live here so book2odt.py (the ODT backend) and the ODG backend can
-both use them.
+shared pieces live here so booksmart2odf.py (the ODT and ODG backends) can use
+them.
 
 A text/image box becomes a draw:frame positioned by svg:x/svg:y.  For ODT the
 caller passes ``pageno`` so the frame gets page anchoring; for ODG ``pageno`` is

@@ -1,6 +1,6 @@
 """Build ODF border-ornament paragraphs for a BookSmart text-box border.
 
-Shared by book2odt.py and book2odg.py.  In BookSmart a text-box border places
+Shared by booksmart2odf.py.  In BookSmart a text-box border places
 an ornament image (a vector SVG from the theme library) within the text flow:
 the top ornament sits above the text and the bottom ornament below it, so the
 bottom ornament moves down as the text grows.  We reproduce that by inserting a

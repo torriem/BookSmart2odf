@@ -1,4 +1,4 @@
-# pybooksmart
+# BookSmart2odf
 
 Converts Blurb **BookSmart** photo books (`.book` files) into OpenDocument
 documents that you can open and edit in LibreOffice — either **ODT**
@@ -13,16 +13,13 @@ Note I have only tested this with my own photo books.  You may have to do manual
 ## Usage
 
 ```
-./book2odt.py [options] <book_file>
+./booksmart2odf.py [options] <book_file>
 ```
-
-(The script is still named `book2odt.py` even though it can now produce ODG as
-well.)
 
 Point it at the `.book` file inside your BookSmart data folder, e.g.:
 
 ```
-./book2odt.py "~/BookSmartData/my book/my book.book"
+./booksmart2odf.py "~/BookSmartData/my book/my book.book"
 ```
 
 ### Options
@@ -42,14 +39,14 @@ Point it at the `.book` file inside your BookSmart data folder, e.g.:
 - `--no-flaps` — with `--cover`, omit the inner flaps from the spread (see
   below).
 
-Run `./book2odt.py --help` for the authoritative list.
+Run `./booksmart2odf.py --help` for the authoritative list.
 
 ## Cover
 
 The cover should be laid out in its own file. Pass `--cover` to convert the cover instead of the book body:
 
 ```
-./book2odt.py --cover "~/BookSmartData/my book/my book.book"
+./booksmart2odf.py --cover "~/BookSmartData/my book/my book.book"
 ```
 
 This writes `<book> cover.<ext>` next to the `.book` file (override with `-o`),
