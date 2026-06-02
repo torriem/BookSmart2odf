@@ -65,7 +65,7 @@ def create_outer_frame(frameno, x, y, width, height, zindex,
             sw, sh = float(height), float(width)
         else:
             sw, sh = float(width), float(height)
-        beta = math.radians(rotation)   # clockwise positive (document y is down)
+        beta = math.radians(rotation)  # BookSmart 'cr' rotates the opposite way
         a = math.cos(beta)
         b = math.sin(beta)
         c = -math.sin(beta)
@@ -75,8 +75,18 @@ def create_outer_frame(frameno, x, y, width, height, zindex,
         f = cy - b * (sw / 2.0) - d * (sh / 2.0)
         draw_frame.attrib[ns('svg:width')] = '%dpt' % sw
         draw_frame.attrib[ns('svg:height')] = '%dpt' % sh
-        draw_frame.attrib[ns('draw:transform')] = \
-            'matrix(%g %g %g %g %gpt %gpt)' % (a, b, c, d, e, f)
+        if layer is not None:
+            # ODG / Draw honors the full matrix transform.
+            draw_frame.attrib[ns('draw:transform')] = \
+                'matrix(%g %g %g %g %gpt %gpt)' % (a, b, c, d, e, f)
+        else:
+            # ODT / Writer ignores a matrix transform but honors the equivalent
+            # rotate()+translate() form.  Writer composes it as translate-after-
+            # rotate (matrix = T(e,f)*R(theta)), so the translation is exactly
+            # the matrix's own (e, f).
+            theta = math.atan2(b, a)
+            draw_frame.attrib[ns('draw:transform')] = \
+                'rotate(%g) translate(%gpt %gpt)' % (-beta, bx + width, by)
     else:
         draw_frame.attrib[ns('svg:width')] = '%dpt' % width
         draw_frame.attrib[ns('svg:height')] = '%dpt' % height
@@ -327,15 +337,26 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
         ts.attrib[ns('style:family')] = 'graphic'
         ts.attrib[ns('style:name')] = style_name
         tp = Element(ns('style:graphic-properties'))
-        if layer is not None or tb.rotation:
-            # ODG (placed by svg:x/svg:y), or a rotated ODT frame (placed by its
-            # draw:transform).  Adding page-anchoring positioning here would
-            # override the transform, so keep the form that doesn't interfere:
-            # parent OuterFrameTextStyle (whose positioning Writer does NOT
-            # inherit through an automatic-style parent) plus an explicit no-fill.
+        if layer is not None:
+            # ODG / Draw: parent OuterFrameTextStyle, explicit no-fill.
             ts.attrib[ns('style:parent-style-name')] = 'OuterFrameTextStyle'
             tp.attrib[ns('draw:fill')] = 'none'
             tp.attrib[ns('draw:stroke')] = 'none'
+        elif tb.rotation:
+            # Rotated ODT box: this must be a drawing-shape "Text Box", not a
+            # Writer "Frame", or Writer refuses to rotate it.  The distinction is
+            # the style: a parentless graphic style with run-through="foreground"
+            # (what LibreOffice emits for a text box) is a drawing shape;
+            # parenting "Frame" would force a non-rotatable text frame.  The
+            # rotate()+translate() transform on the frame does the placement.
+            tp.attrib[ns('draw:stroke')] = 'none'
+            tp.attrib[ns('draw:fill')] = 'none'
+            tp.attrib[ns('style:run-through')] = 'foreground'
+            tp.attrib[ns('style:wrap')] = 'run-through'
+            tp.attrib[ns('style:vertical-pos')] = 'from-top'
+            tp.attrib[ns('style:vertical-rel')] = 'page'
+            tp.attrib[ns('style:horizontal-pos')] = 'from-left'
+            tp.attrib[ns('style:horizontal-rel')] = 'page'
         else:
             # non-rotated ODT / Writer frame: Writer won't inherit the frame
             # positioning, so mirror what LibreOffice itself emits -- parent the
