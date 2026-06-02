@@ -112,7 +112,7 @@ class ImageBox(object):
 
     def fix_dpi(self, save_disk = None, **kwargs):
         """
-            fix the embedded image file DPI if necessary. 
+            fix the embedded image file DPI if necessary.
 
             If save_disk is OVERWRITE, set the DPI on the file in place,
             setting it permanently.
@@ -126,49 +126,82 @@ class ImageBox(object):
 
             If tempdir is passed as a kwarg, a temporary file will be created
             within that directory if we're not using SAVEASCOPY or OVERWRITE
+
+            By default the resolution metadata is rewritten with Pillow.  If an
+            'exiftool' path is passed as a kwarg, exiftool is used instead
+            (metadata-only, no re-encode), so we keep the option of switching
+            back to exiftool in future.
         """
 
-        if self.dpi[0] != 300 and self.dpi[0] != 600:
-            # If DPI seems odd, LibreOffice often has problems with the dpi and
-            # any cropping we do to the image will be wrong.  So call out to
-            # exiftool externally to change the DPI to a default of 300.
+        if self.dpi[0] == 300 or self.dpi[0] == 600:
+            return
 
-            if not save_disk:
-                if 'tempdir' in kwargs:
-                    if not os.path.exists(kwargs['tempdir']):
-                        os.mkdir(kwargs['tempdir'])
+        # If DPI seems odd, LibreOffice has trouble with sizing, and any
+        # cropping we do to the image will be wrong.  So rewrite the image's
+        # resolution metadata to a default of 300.
 
-                    newfile = os.path.join(kwargs['tempdir'],os.path.basename(os.path.abspath(self.filename)))+'.%s' % self.format
-                    #print (newfile)
-                    with open(newfile,'wb') as newfileobj:
-                        newfileobj.write(open(self.filename,'rb').read())
-                else:
-                    newfileobj = tempfile.NamedTemporaryFile(delete=False, prefix='bookxml', suffix='.%s' % self.format)
-                    newfileobj.write(open(self.filename,'rb').read())
-                    newfile = newfileobj.name
-                    newfileobj.close()
-            elif save_disk == ImageBox.SAVEASCOPY:
-                newfile = self.filename + ".300dpi.%s" % self.format
-                if os.path.exists(newfile):
-                    self.filename = newfile
-                    self.dpi = (300, 300)
-                    return
+        # decide where the fixed image goes
+        if not save_disk:
+            if 'tempdir' in kwargs:
+                if not os.path.exists(kwargs['tempdir']):
+                    os.mkdir(kwargs['tempdir'])
 
-                with open(newfile,'wb') as newfileobj:
-                    newfileobj.write(open(self.filename,'rb').read())
+                newfile = os.path.join(kwargs['tempdir'],os.path.basename(os.path.abspath(self.filename)))+'.%s' % self.format
             else:
-                newfile = self.filename
+                newfileobj = tempfile.NamedTemporaryFile(delete=False, prefix='bookxml', suffix='.%s' % self.format)
+                newfile = newfileobj.name
+                newfileobj.close()
+        elif save_disk == ImageBox.SAVEASCOPY:
+            newfile = self.filename + ".300dpi.%s" % self.format
+            if os.path.exists(newfile):
+                self.filename = newfile
+                self.dpi = (300, 300)
+                return
+        else:
+            newfile = self.filename
 
-            exiftool = kwargs.get('exiftool','/usr/bin/exiftool')
+        if kwargs.get('exiftool'):
+            self._fix_dpi_exiftool(newfile, kwargs['exiftool'], save_disk)
+        else:
+            self._fix_dpi_pillow(newfile)
 
-            # call exiftool to set the DPI to 300:
-            subprocess.run([exiftool, '-jfif:Xresolution=300', '-jfif:Yresolution=300', '-Xresolution=300', '-Yresolution=300', newfile], capture_output = True)
+        self.filename = newfile
+        self.dpi = (300, 300)
 
-            if not save_disk == ImageBox.OVERWRITE:
-                # delete exiftool's backup
-                os.unlink("%s_original" % newfile)
-            self.filename = newfile
-            self.dpi = (300,300)
+    def _fix_dpi_exiftool(self, newfile, exiftool, save_disk):
+        """Set the resolution to 300 dpi with exiftool (metadata only)."""
+        if newfile != self.filename:
+            with open(newfile, 'wb') as out:
+                out.write(open(self.filename, 'rb').read())
+
+        # sets both the JFIF density and the EXIF resolution
+        subprocess.run([exiftool, '-jfif:Xresolution=300', '-jfif:Yresolution=300',
+                        '-Xresolution=300', '-Yresolution=300', newfile],
+                       capture_output=True)
+
+        if save_disk != ImageBox.OVERWRITE:
+            # delete exiftool's backup
+            os.unlink("%s_original" % newfile)
+
+    def _fix_dpi_pillow(self, newfile):
+        """Set the resolution to 300 dpi with Pillow.
+
+        For JPEG this writes both the JFIF density and the EXIF resolution (as
+        exiftool did) and re-encodes reusing the original quantization tables
+        (visually near-lossless).  Other formats just get the dpi metadata.
+        """
+        image = PIL.Image.open(self.filename)
+        image.load() # decode before we possibly overwrite the source (OVERWRITE)
+        fmt = image.format or self.format.upper()
+
+        if fmt == 'JPEG':
+            exif = image.getexif()
+            exif[0x011A] = 300 # XResolution
+            exif[0x011B] = 300 # YResolution
+            exif[0x0128] = 2   # ResolutionUnit = inches
+            image.save(newfile, 'JPEG', dpi=(300, 300), exif=exif, quality='keep')
+        else:
+            image.save(newfile, fmt, dpi=(300, 300))
 
     def calculate_crop(self):
         """

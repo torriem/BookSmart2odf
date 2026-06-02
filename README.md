@@ -102,12 +102,9 @@ Python modules:
 
 - `ezodf`
 - `lxml`
-- `PIL` (Pillow)
+- `PIL` (Pillow) — also used to normalize image DPI so LibreOffice sizes and
+  crops images correctly
 - `pycryptodome` / `Crypto` — only needed for decrypting border ornaments
   (the `-b` option)
-
-External tools:
-
-- `exiftool` — used to normalize image DPI so cropping comes out right.
 
 (There may be other incidental dependencies.)
