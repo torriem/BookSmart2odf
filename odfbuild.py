@@ -11,6 +11,7 @@ None (the frame is simply a child of its draw:page).
 """
 
 import os
+import math
 from ezodf.const import ALL_NSMAP
 from lxml.etree import Element
 
@@ -26,13 +27,17 @@ def ns(combined_name):
 
 def create_outer_frame(frameno, x, y, width, height, zindex,
                        transparent=False, pageno=None, layer=None,
-                       style_name=None, x_offset=0):
+                       style_name=None, x_offset=0, rotation=0):
     """Create the outer draw:frame for a text or image box.
 
     When ``pageno`` is given (ODT) the frame is page-anchored; when it is None
     (ODG) the frame carries no anchor and is positioned directly on its page.
     ``layer`` (e.g. "layout") is set for ODG, where every shape belongs to a
     drawing layer.  ``style_name`` overrides the default frame style.
+
+    ``rotation`` (clockwise degrees, e.g. 90 for spine text) rotates the frame
+    about the centre of its box via draw:transform.  For 90/270 the frame's
+    layout width/height are swapped so the text flows along the long axis.
     """
     draw_frame = Element(ns('draw:frame'))
     draw_frame.attrib[ns('draw:name')] = 'Frame%d' % (frameno)
@@ -44,10 +49,35 @@ def create_outer_frame(frameno, x, y, width, height, zindex,
         draw_frame.attrib[ns('draw:style-name')] = 'OuterFrameImageStyle'
     if layer is not None:
         draw_frame.attrib[ns('draw:layer')] = layer
-    draw_frame.attrib[ns('svg:width')] = '%dpt' % width
-    draw_frame.attrib[ns('svg:height')] = '%dpt' % height
-    draw_frame.attrib[ns('svg:x')] = '%dpt' % (x + x_offset)
-    draw_frame.attrib[ns('svg:y')] = '%dpt' % y
+
+    if rotation:
+        bx = x + x_offset
+        by = y
+        cx = bx + width / 2.0   # box centre (rotation is about this point)
+        cy = by + height / 2.0
+        # swap layout dimensions for quarter turns so text runs the long way
+        if rotation in (90, 270):
+            sw, sh = float(height), float(width)
+        else:
+            sw, sh = float(width), float(height)
+        beta = math.radians(rotation)   # clockwise positive (document y is down)
+        a = math.cos(beta)
+        b = math.sin(beta)
+        c = -math.sin(beta)
+        d = math.cos(beta)
+        # map the frame's local origin so its box centre lands on (cx, cy)
+        e = cx - a * (sw / 2.0) - c * (sh / 2.0)
+        f = cy - b * (sw / 2.0) - d * (sh / 2.0)
+        draw_frame.attrib[ns('svg:width')] = '%dpt' % sw
+        draw_frame.attrib[ns('svg:height')] = '%dpt' % sh
+        draw_frame.attrib[ns('draw:transform')] = \
+            'matrix(%g %g %g %g %gpt %gpt)' % (a, b, c, d, e, f)
+    else:
+        draw_frame.attrib[ns('svg:width')] = '%dpt' % width
+        draw_frame.attrib[ns('svg:height')] = '%dpt' % height
+        draw_frame.attrib[ns('svg:x')] = '%dpt' % (x + x_offset)
+        draw_frame.attrib[ns('svg:y')] = '%dpt' % y
+
     if pageno is not None:
         draw_frame.attrib[ns('text:anchor-type')] = 'page'
         draw_frame.attrib[ns('text:anchor-page-number')] = '%d' % (pageno + 1)
@@ -257,7 +287,7 @@ def emit_frame_styles(bodf, fill_none=False):
 def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
                   booksmart_dir=None, tempdir=None, border_images=None,
                   layer=None, include_borders=True,
-                  pad_top=0, pad_bottom=0, x_offset=0):
+                  pad_top=0, pad_bottom=0, x_offset=0, valign=None):
     """Build the outer draw:frame for a text box (text-box + paragraphs + borders).
 
     Returns (outer_frame, frame_no) where frame_no has been advanced by any
@@ -272,7 +302,7 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
     # When a border ornament occupies the top/bottom edge (ODG), inset the
     # text with a per-box style so it doesn't sit under the ornament.
     style_name = None
-    if pad_top or pad_bottom:
+    if pad_top or pad_bottom or valign:
         style_name = 'textframe%d' % frame_no
         ts = Element(ns('style:style'))
         ts.attrib[ns('style:family')] = 'graphic'
@@ -283,6 +313,10 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
             tp.attrib[ns('fo:padding-top')] = '%gpt' % pad_top
         if pad_bottom:
             tp.attrib[ns('fo:padding-bottom')] = '%gpt' % pad_bottom
+        if valign:
+            # vertically centre the text within the frame (e.g. spine text,
+            # centred across the spine width after rotation)
+            tp.attrib[ns('draw:textarea-vertical-align')] = valign
         # keep the frame transparent in Draw (don't rely on inheritance)
         tp.attrib[ns('draw:fill')] = 'none'
         tp.attrib[ns('draw:stroke')] = 'none'
@@ -293,10 +327,14 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
     outer_frame = create_outer_frame(frame_no, tb.x, tb.y,
                                      tb.width, tb.height, page_item_count,
                                      transparent=True, pageno=pageno, layer=layer,
-                                     style_name=style_name, x_offset=x_offset)
+                                     style_name=style_name, x_offset=x_offset,
+                                     rotation=tb.rotation)
 
+    # the text-box fills the frame; for quarter-turn rotation the frame's
+    # layout height is the box's (unrotated) width
+    local_height = tb.width if tb.rotation in (90, 270) else tb.height
     dtb = Element(ns('draw:text-box'))
-    dtb.attrib[ns('fo:max-height')] = '%dpt' % tb.height
+    dtb.attrib[ns('fo:max-height')] = '%dpt' % local_height
 
     outer_frame.append(dtb)
 

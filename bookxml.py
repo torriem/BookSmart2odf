@@ -16,6 +16,8 @@ class TextBox(object):
 
         self.paragraphs = []
         self.border = None # a Border object, if this text box has a decorative border
+        self.rotation = 0  # clockwise rotation in degrees (BookSmart 'cr', e.g. spine text)
+        self.valign = None # vertical alignment enum (BookSmart 'va')
 
     def __repr__(self):
         return ('TextBox(%d,%d,%d,%d,%s)' % (self.x, self.y, self.width, self.height, repr(self.paragraphs)))
@@ -696,6 +698,11 @@ class BookXML(object):
                 text_box.y = coords[1]
                 text_box.width = coords[2]
                 text_box.height = coords[3]
+
+                if 'cr' in tc.attrib:
+                    text_box.rotation = int(float(tc.attrib['cr'])) # clockwise degrees
+                if 'va' in tc.attrib:
+                    text_box.valign = int(tc.attrib['va'])
 
                 #if rxt: print ('rxt is ', rxt)
                 #print ('%d, %d x %d, %d, on page %d' % (text_box.x, text_box.y, text_box.width, text_box.height, pageno+1))

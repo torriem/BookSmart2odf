@@ -389,6 +389,14 @@ def process_cover(bodf, bs, fmt, **kwargs):
             frame_no += 1
 
         for tb in part.text_boxes:
+            valign = None
+            if tb.rotation in (90, 270):
+                # rotated (spine) text: make the frame span the full part width
+                # and centre the text across it
+                tb.x = 0
+                tb.width = part.width
+                valign = 'middle'
+
             top_spec = bot_spec = None
             pad_top = pad_bottom = 0
             if fmt == 'odg' and tb.border and booksmart_dir:
@@ -407,7 +415,7 @@ def process_cover(bodf, bs, fmt, **kwargs):
                 booksmart_dir=booksmart_dir, tempdir=kwargs['tempdir'],
                 border_images=border_images, layer=layer,
                 include_borders=(fmt != 'odg'), pad_top=pad_top,
-                pad_bottom=pad_bottom, x_offset=x_off)
+                pad_bottom=pad_bottom, x_offset=x_off, valign=valign)
             attach(outer_frame)
             page_item_count += 1
             frame_no += 1
