@@ -371,8 +371,12 @@ def process_cover(bodf, bs, fmt, no_flaps=False, **kwargs):
         attach = draw_page.append
         pageno, layer, flatten = None, 'layout', True
     else:
-        bodf.body.xmlnode.append(Element(ns('text:p')))
-        attach = lambda el: bodf.body.xmlnode.insert(2, el)
+        # Append (rather than insert) so document order matches the emission
+        # order bg -> image -> text; Writer stacks later-in-document on top, so
+        # the text boxes end up above the images for easy editing.  The closing
+        # paragraph is added at the end (below), after the shapes, because the
+        # text body must end with a paragraph or the page renders blank.
+        attach = bodf.body.xmlnode.append
         pageno, layer, flatten = 0, None, False
 
     x_off = 0
@@ -445,6 +449,9 @@ def process_cover(bodf, bs, fmt, no_flaps=False, **kwargs):
 
     if fmt == 'odg':
         bodf.body.xmlnode.append(draw_page)
+    else:
+        # close the text body with a paragraph, after all the shapes
+        bodf.body.xmlnode.append(Element(ns('text:p')))
     print ('done.')
 
 
