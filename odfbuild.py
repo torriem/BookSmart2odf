@@ -25,6 +25,11 @@ def ns(combined_name):
     return "{%s}%s" % (ALL_NSMAP[prefix], name)
 
 
+# BookSmart text-box vertical alignment ('va') -> ODF draw:textarea-vertical-align.
+# Absent/0 means top (the default), so it is left unmapped.
+VALIGN_MAP = {3: 'middle', 4: 'bottom'}
+
+
 def create_outer_frame(frameno, x, y, width, height, zindex,
                        transparent=False, pageno=None, layer=None,
                        style_name=None, x_offset=0, rotation=0):
@@ -60,7 +65,7 @@ def create_outer_frame(frameno, x, y, width, height, zindex,
             sw, sh = float(height), float(width)
         else:
             sw, sh = float(width), float(height)
-        beta = math.radians(rotation)   # clockwise positive (document y is down)
+        beta = math.radians(rotation)  # BookSmart 'cr' rotates the opposite way
         a = math.cos(beta)
         b = math.sin(beta)
         c = -math.sin(beta)
@@ -70,8 +75,18 @@ def create_outer_frame(frameno, x, y, width, height, zindex,
         f = cy - b * (sw / 2.0) - d * (sh / 2.0)
         draw_frame.attrib[ns('svg:width')] = '%dpt' % sw
         draw_frame.attrib[ns('svg:height')] = '%dpt' % sh
-        draw_frame.attrib[ns('draw:transform')] = \
-            'matrix(%g %g %g %g %gpt %gpt)' % (a, b, c, d, e, f)
+        if layer is not None:
+            # ODG / Draw honors the full matrix transform.
+            draw_frame.attrib[ns('draw:transform')] = \
+                'matrix(%g %g %g %g %gpt %gpt)' % (a, b, c, d, e, f)
+        else:
+            # ODT / Writer ignores a matrix transform but honors the equivalent
+            # rotate()+translate() form.  Writer composes it as translate-after-
+            # rotate (matrix = T(e,f)*R(theta)), so the translation is exactly
+            # the matrix's own (e, f).
+            theta = math.atan2(b, a)
+            draw_frame.attrib[ns('draw:transform')] = \
+                'rotate(%g) translate(%gpt %gpt)' % (-beta, bx + width, by)
     else:
         draw_frame.attrib[ns('svg:width')] = '%dpt' % width
         draw_frame.attrib[ns('svg:height')] = '%dpt' % height
@@ -154,7 +169,12 @@ def emit_text_styles(bodf, bs):
         sp_p = Element(ns('style:paragraph-properties'))
         sp_p.attrib[ns('fo:text-align')] = bookxml.ParagraphStyle.ALIGN[ps['alignment']]
         sp_p.attrib[ns('style:justify-single-word')] = 'false'
-        sp_p.attrib[ns('fo:line-height')] = '%d%%' % ((ps['line_spacing'] + 1) * 100)
+        if ps['line_spacing']:
+            # BookSmart specified extra line spacing; honor it
+            sp_p.attrib[ns('fo:line-height')] = '%d%%' % ((ps['line_spacing'] + 1) * 100)
+        else:
+            # BookSmart didn't specify spacing; default frame text to 1.15
+            sp_p.attrib[ns('fo:line-height')] = '115%'
         sp_p.attrib[ns('fo:margin-left')] = '%dpt' % ps['left_indent']
 
         ss.append(sp_p)
@@ -299,27 +319,63 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
     shapes instead.  ``pad_top``/``pad_bottom`` (points) inset the text inside
     the frame so it starts below a top ornament / stops above a bottom one.
     """
-    # When a border ornament occupies the top/bottom edge (ODG), inset the
-    # text with a per-box style so it doesn't sit under the ornament.
+    # Apply the box's own vertical alignment (BookSmart 'va') unless the caller
+    # forced one (e.g. the spine).
+    if valign is None:
+        valign = VALIGN_MAP.get(tb.valign)
+
+    # A per-box style is needed when we inset the text (border ornament) or set
+    # a vertical alignment.  Writer does not inherit frame positioning through an
+    # automatic-style parent, so for ODT we mirror what LibreOffice itself emits:
+    # parent the built-in "Frame" style and repeat the positioning inline.  For
+    # ODG (layer set) the committed approach works (parent OuterFrameTextStyle,
+    # explicit no-fill); Draw positions by svg:x/svg:y so positioning is moot.
     style_name = None
     if pad_top or pad_bottom or valign:
         style_name = 'textframe%d' % frame_no
         ts = Element(ns('style:style'))
         ts.attrib[ns('style:family')] = 'graphic'
         ts.attrib[ns('style:name')] = style_name
-        ts.attrib[ns('style:parent-style-name')] = 'OuterFrameTextStyle'
         tp = Element(ns('style:graphic-properties'))
+        if layer is not None:
+            # ODG / Draw: parent OuterFrameTextStyle, explicit no-fill.
+            ts.attrib[ns('style:parent-style-name')] = 'OuterFrameTextStyle'
+            tp.attrib[ns('draw:fill')] = 'none'
+            tp.attrib[ns('draw:stroke')] = 'none'
+        elif tb.rotation:
+            # Rotated ODT box: this must be a drawing-shape "Text Box", not a
+            # Writer "Frame", or Writer refuses to rotate it.  The distinction is
+            # the style: a parentless graphic style with run-through="foreground"
+            # (what LibreOffice emits for a text box) is a drawing shape;
+            # parenting "Frame" would force a non-rotatable text frame.  The
+            # rotate()+translate() transform on the frame does the placement.
+            tp.attrib[ns('draw:stroke')] = 'none'
+            tp.attrib[ns('draw:fill')] = 'none'
+            tp.attrib[ns('style:run-through')] = 'foreground'
+            tp.attrib[ns('style:wrap')] = 'run-through'
+            tp.attrib[ns('style:vertical-pos')] = 'from-top'
+            tp.attrib[ns('style:vertical-rel')] = 'page'
+            tp.attrib[ns('style:horizontal-pos')] = 'from-left'
+            tp.attrib[ns('style:horizontal-rel')] = 'page'
+        else:
+            # non-rotated ODT / Writer frame: Writer won't inherit the frame
+            # positioning, so mirror what LibreOffice itself emits -- parent the
+            # built-in "Frame" style and repeat the positioning inline.
+            ts.attrib[ns('style:parent-style-name')] = 'Frame'
+            tp.attrib[ns('fo:border')] = 'none'
+            tp.attrib[ns('fo:padding')] = '0in'
+            tp.attrib[ns('style:horizontal-pos')] = 'from-left'
+            tp.attrib[ns('style:vertical-pos')] = 'from-top'
+            tp.attrib[ns('style:vertical-rel')] = 'page'
+            tp.attrib[ns('style:horizontal-rel')] = 'page'
+            tp.attrib[ns('style:wrap')] = 'run-through'
+            tp.attrib[ns('draw:opacity')] = '0%'
         if pad_top:
             tp.attrib[ns('fo:padding-top')] = '%gpt' % pad_top
         if pad_bottom:
             tp.attrib[ns('fo:padding-bottom')] = '%gpt' % pad_bottom
         if valign:
-            # vertically centre the text within the frame (e.g. spine text,
-            # centred across the spine width after rotation)
             tp.attrib[ns('draw:textarea-vertical-align')] = valign
-        # keep the frame transparent in Draw (don't rely on inheritance)
-        tp.attrib[ns('draw:fill')] = 'none'
-        tp.attrib[ns('draw:stroke')] = 'none'
         ts.append(tp)
         bodf.content.automatic_styles.xmlnode.append(ts)
 
