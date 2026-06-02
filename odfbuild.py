@@ -11,6 +11,7 @@ None (the frame is simply a child of its draw:page).
 """
 
 import os
+import re
 import math
 from ezodf.const import ALL_NSMAP
 from lxml.etree import Element
@@ -23,6 +24,53 @@ import odfborder
 def ns(combined_name):
     prefix, name = combined_name.split(':')
     return "{%s}%s" % (ALL_NSMAP[prefix], name)
+
+
+def set_span_text(span, text):
+    """Set a text:span's content, preserving runs of spaces.
+
+    ODF (and LibreOffice) collapse a run of spaces to one and drop leading
+    spaces in span text, which loses manual spacing BookSmart uses to position
+    words (e.g. on covers).  Encode those spaces as <text:s text:c="N"/>: a
+    leading run is emitted entirely as text:s, and for an internal run the first
+    space stays literal with the rest as text:s -- matching how LibreOffice
+    itself writes spacing.
+    """
+    last = None  # last child appended, so following text goes in its .tail
+    pos = 0
+    for m in re.finditer(r' +', text):
+        pre = text[pos:m.start()]
+        if pre:
+            if last is None:
+                span.text = (span.text or '') + pre
+            else:
+                last.tail = (last.tail or '') + pre
+
+        run = m.end() - m.start()
+        if m.start() == 0:
+            count = run  # leading: a literal space would collapse, encode all
+        else:
+            literal = ' '  # one literal space, encode the remainder
+            if last is None:
+                span.text = (span.text or '') + literal
+            else:
+                last.tail = (last.tail or '') + literal
+            count = run - 1
+
+        if count:
+            s_el = Element(ns('text:s'))
+            if count > 1:
+                s_el.attrib[ns('text:c')] = str(count)
+            span.append(s_el)
+            last = s_el
+        pos = m.end()
+
+    rest = text[pos:]
+    if rest:
+        if last is None:
+            span.text = (span.text or '') + rest
+        else:
+            last.tail = (last.tail or '') + rest
 
 
 # BookSmart text-box vertical alignment ('va') -> ODF draw:textarea-vertical-align.
@@ -426,7 +474,7 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
             elif s.variable == '$BookTitle':
                 span.append(Element(ns('text:title')))
             else:
-                span.text = s.text
+                set_span_text(span, s.text)
             paragraph.append(span)
         dtb.append(paragraph)
 
