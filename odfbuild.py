@@ -472,7 +472,16 @@ def build_textbox(bodf, tb, frame_no, page_item_count, pageno=None,
             if s.variable == '$PageNumber':
                 span.append(Element(ns('text:page-number')))
             elif s.variable == '$BookTitle':
-                span.append(Element(ns('text:title')))
+                if layer is not None:
+                    # LibreOffice Draw (ODG) does not render a text:title field
+                    # at all, so emit the title as plain text instead.
+                    set_span_text(span, s.text)
+                else:
+                    # Writer (ODT) renders and refreshes the field from
+                    # dc:title; give it visible content too.
+                    title_el = Element(ns('text:title'))
+                    title_el.text = s.text
+                    span.append(title_el)
             else:
                 set_span_text(span, s.text)
             paragraph.append(span)
