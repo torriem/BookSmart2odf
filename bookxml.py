@@ -1,5 +1,5 @@
 import os
-import lxml.etree
+import xml.etree.ElementTree as ET
 import PIL.Image
 import tempfile
 import subprocess
@@ -594,7 +594,7 @@ def javaxml_to_python(object_):
 class BookXML(object):
 
     def __init__(self, book_file):
-        tree = lxml.etree.parse(open(book_file, 'r'))
+        tree = ET.parse(book_file)
         self.book = tree.getroot()
         self.book_path = os.path.dirname(book_file)
         self.info = {}
@@ -759,7 +759,7 @@ class BookXML(object):
                     text_box.border = Border(border_definition)
 
                 dmtext = dm.text.encode('utf-8')
-                dmobj = lxml.etree.fromstring(dmtext)[0] # get the first child of the java node
+                dmobj = ET.fromstring(dmtext)[0] # get the first child of the java node
                 
                 text_structure = javaxml_to_python(dmobj) # a nested structure of lists and dicts
 
