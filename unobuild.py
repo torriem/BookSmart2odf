@@ -415,7 +415,13 @@ def _bev_path(stem, booksmart_dir):
 
 
 def _edge_size(spec, booksmart_dir):
-    """(width, height) pt of an ornament, or None if the .bev is missing."""
+    """(width, height) pt of an ornament; None if no path or the .bev is missing.
+
+    bev (DES/pycryptodome) is imported here, only once a BookSmart3 path is in
+    play, so the backend runs without it when borders aren't used.
+    """
+    if not booksmart_dir:
+        return None
     import bev
     path = _bev_path(spec[0], booksmart_dir)
     if not os.path.exists(path):
@@ -446,7 +452,13 @@ def border_pads(tb, booksmart_dir):
 
 def add_border_ornaments(doc, page, smgr, ctx, tb, top_spec, bot_spec,
                          booksmart_dir, x_offset=0):
-    """Place the top/bottom border ornament shapes for a text box."""
+    """Place the top/bottom border ornament shapes for a text box.
+
+    No-op without a BookSmart3 path -- the ornament .bev assets live there, and
+    bev (DES/pycryptodome) is only imported once we have one.
+    """
+    if not booksmart_dir:
+        return
     import bev
     gp = smgr.createInstanceWithContext(
         "com.sun.star.graphic.GraphicProvider", ctx)
