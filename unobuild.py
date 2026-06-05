@@ -157,8 +157,25 @@ def _set(obj, **props):
             pass
 
 
+def set_page_background(doc, page, color):
+    """Set a drawing-page solid background fill on ``page``.
+
+    This is the faithful equivalent of the CLI's drawing-page-properties
+    ``draw:fill``/``draw:fill-color`` (ODG has no Writer-style page styles).
+    ``com.sun.star.drawing.Background`` is the instantiable fill bag; assigned
+    to the page's ``Background`` property it round-trips to the same ODF.
+    """
+    bg = doc.createInstance("com.sun.star.drawing.Background")
+    bg.setPropertyValue(
+        "FillStyle", uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"))
+    bg.setPropertyValue("FillColor", color_to_int(color))
+    page.Background = bg
+
+
 def add_bg_rect(doc, page, width, height, color, x=0, y=0):
-    """Full-part solid background rectangle (page bg / cover-part bg)."""
+    """Solid background rectangle, for per-part cover backgrounds (a cover page
+    holds several differently-coloured parts, so those can't use the single
+    per-page background fill)."""
     rect = doc.createInstance("com.sun.star.drawing.RectangleShape")
     rect.Size = Size(pt(width), pt(height))
     rect.Position = Point(pt(x), pt(y))
@@ -243,8 +260,32 @@ def add_text_box(doc, page, tb, para_styles, span_styles, page_no):
     return shape
 
 
+def _apply_flip(shape, x, y, w, h, hflip, vflip):
+    """Mirror a shape in place via its Transformation matrix.
+
+    GraphicObjectShape has no plain mirror property; flipping is a negative
+    scale.  The bounding box is preserved by translating the negated axis.
+    Nested UNO structs returned by attribute access are copies, so each Line is
+    mutated locally and reassigned (else the change is silently lost).
+    """
+    if not (hflip or vflip):
+        return
+    t = shape.Transformation
+    if hflip:
+        l1 = t.Line1
+        l1.Column1 = -l1.Column1   # negate x-scale
+        l1.Column3 = x + w         # keep the bounding box
+        t.Line1 = l1
+    if vflip:
+        l2 = t.Line2
+        l2.Column2 = -l2.Column2   # negate y-scale
+        l2.Column3 = y + h
+        t.Line2 = l2
+    shape.Transformation = t
+
+
 def add_image(doc, page, smgr, ctx, ib, x_offset=0):
-    """A BookSmart image box -> a GraphicObjectShape, sized + cropped."""
+    """A BookSmart image box -> a GraphicObjectShape, sized + cropped + mirrored."""
     graphic, mm, px = load_graphic(smgr, ctx, ib.filename)
 
     # crop as a pixel fraction: setting ib.dpi to the pixel dims makes
@@ -252,11 +293,13 @@ def add_image(doc, page, smgr, ctx, ib, x_offset=0):
     ib.dpi = (px.Width or 1, px.Height or 1)
     ib.calculate_crop()
 
+    sw, sh = pt(ib.width), pt(ib.height)
+    sx, sy = pt(ib.box_x + ib.x + x_offset), pt(ib.box_y + ib.y)
     shape = doc.createInstance("com.sun.star.drawing.GraphicObjectShape")
     page.add(shape)
     shape.Graphic = graphic
-    shape.Size = Size(pt(ib.width), pt(ib.height))
-    shape.Position = Point(pt(ib.box_x + ib.x + x_offset), pt(ib.box_y + ib.y))
+    shape.Size = Size(sw, sh)
+    shape.Position = Point(sx, sy)
 
     nat_w = mm.Width if mm.Width else int(px.Width / 96.0 * 2540)
     nat_h = mm.Height if mm.Height else int(px.Height / 96.0 * 2540)
@@ -266,7 +309,8 @@ def add_image(doc, page, smgr, ctx, ib, x_offset=0):
     crop.Top = int(ib.crop_top * nat_h)
     crop.Bottom = int(ib.crop_bottom * nat_h)
     _set(shape, GraphicCrop=crop)
-    # TODO: vflip/hflip mirroring (BookSmart transform), decorative borders
+    _apply_flip(shape, sx, sy, sw, sh, ib.hflip, ib.vflip)
+    # TODO: decorative borders
     return shape
 
 
@@ -295,10 +339,10 @@ def inject_draw(doc, bs, smgr, ctx, page_limit=None):
         page.Height = pt(bs.height)
         _set(page, BorderLeft=0, BorderRight=0, BorderTop=0, BorderBottom=0)
 
-        # page background (full-page rect at the bottom of the stack)
+        # page background via the drawing-page fill (matches the CLI)
         pstyle = page_styles.get(bs.page_info[page_id]['page_style'])
         if pstyle is not None and pstyle['bgcolor'] != '#ffffff':
-            add_bg_rect(doc, page, bs.width, bs.height, pstyle['bgcolor'])
+            set_page_background(doc, page, pstyle['bgcolor'])
 
         # text boxes, then images on top (matches the .odg z-order)
         for tb in bs.text_boxes[page_id]:
