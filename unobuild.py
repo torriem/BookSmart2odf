@@ -22,6 +22,7 @@ image mirroring (vflip/hflip), and live page-number fields.
 
 import os
 import sys
+import xml.etree.ElementTree as ET
 import uno
 from com.sun.star.awt import Size, Point
 from com.sun.star.beans import PropertyValue
@@ -223,12 +224,15 @@ def _apply_char_props(cursor, eff):
 
 
 def add_text_box(doc, page, tb, para_styles, span_styles, page_no,
-                 x_offset=0, valign_override=None):
+                 x_offset=0, valign_override=None, pad_top=0, pad_bottom=0):
     """A BookSmart text box -> a Draw TextShape with styled paragraphs.
 
     ``x_offset`` shifts the box right (used to lay cover parts side by side).
     ``valign_override`` (a TextVerticalAdjust value) forces vertical alignment,
-    e.g. centred spine text.
+    e.g. centred spine text.  ``pad_top``/``pad_bottom`` (points) inset the text
+    so it clears top/bottom border ornaments -- applied geometrically (shrink the
+    box) rather than via TextUpper/LowerDistance, which Draw does not reliably
+    honour for text placement on a TextShape.
     """
     shape = doc.createInstance("com.sun.star.drawing.TextShape")
     if tb.rotation in (90, 270):
@@ -242,8 +246,9 @@ def add_text_box(doc, page, tb, para_styles, span_styles, page_no,
         shape.Size = Size(w100, h100)
         shape.Position = Point(cx - w100 // 2, cy - h100 // 2)
     else:
-        shape.Size = Size(pt(tb.width), pt(tb.height))
-        shape.Position = Point(pt(tb.x + x_offset), pt(tb.y))
+        # inset top/bottom for border ornaments by shrinking the box itself
+        shape.Size = Size(pt(tb.width), pt(tb.height - pad_top - pad_bottom))
+        shape.Position = Point(pt(tb.x + x_offset), pt(tb.y + pad_top))
     page.add(shape)
 
     _set(shape, TextAutoGrowHeight=False, TextAutoGrowWidth=False,
@@ -342,18 +347,160 @@ def add_image(doc, page, smgr, ctx, ib, x_offset=0):
     crop.Bottom = int(ib.crop_bottom * nat_h)
     _set(shape, GraphicCrop=crop)
     _apply_flip(shape, sx, sy, sw, sh, ib.hflip, ib.vflip)
-    # TODO: decorative borders
     return shape
+
+
+# --------------------------------------------------------------------------
+# decorative text-box borders (ornament SVGs from the theme library)
+# --------------------------------------------------------------------------
+#
+# A BookSmart text-box border places an ornament image above the text (top
+# edge) and below it (bottom edge).  Mirrors odfborder's ODG path: each
+# ornament is an absolutely-positioned shape centred on the text box at the
+# top/bottom edge, and the text is inset by the ornament height.  The .bev
+# assets are DES-encrypted SVGs under <booksmart_dir>/resources/themes/library.
+#
+# NOTE (Phase 3): bev.decrypt_bev pulls in pycryptodome (DES) and lxml, which a
+# stock LibreOffice bundled Python lacks -- the .oxt will need a pure-Python DES
+# and the et-based helpers below instead.  Imported lazily so the backend loads
+# (and the non-border paths run) without those packages.
+
+def _strip_unit(value):
+    """SVG length like '45.848px' or '28' -> float (BookSmart treats units as pt)."""
+    value = value.strip()
+    for unit in ('px', 'pt', 'in', 'cm', 'mm'):
+        if value.endswith(unit):
+            value = value[:-len(unit)]
+            break
+    return float(value)
+
+
+def _svg_dims(svg_bytes):
+    """Return (width, height) in points of an SVG (root width/height or viewBox)."""
+    root = ET.fromstring(svg_bytes)
+    w, h = root.get('width'), root.get('height')
+    if w is not None and h is not None:
+        return _strip_unit(w), _strip_unit(h)
+    vb = root.get('viewBox')
+    if vb:
+        parts = vb.replace(',', ' ').split()
+        return float(parts[2]), float(parts[3])
+    raise ValueError('SVG has no width/height or viewBox')
+
+
+def _resolve_edges(border):
+    """(top_spec, bot_spec) for a Border; each is (image_stem, mirrored) or None.
+
+    Reimplements odfborder.resolve_edges.  Only top/bot edges with mirrorEdge
+    0/OPPOSITE have ever been seen; left/right and MIRROR_ALL are unsupported.
+    """
+    top = (border.edges['top'], False) if 'top' in border.edges else None
+    bot = (border.edges['bot'], False) if 'bot' in border.edges else None
+    if border.mirror_edge == bookxml.Border.MIRROR_OPPOSITE:
+        if top and not bot:
+            bot = (border.edges['top'], True)
+        elif bot and not top:
+            top = (border.edges['bot'], True)
+    elif border.mirror_edge == bookxml.Border.MIRROR_ALL:
+        print('warning: border mirrorEdge=MIRROR_ALL not supported, '
+              'drawing declared edges only')
+    if 'left' in border.edges or 'right' in border.edges:
+        print('warning: left/right border edges not supported, skipping')
+    return top, bot
+
+
+def _bev_path(stem, booksmart_dir):
+    return os.path.join(booksmart_dir, 'resources', 'themes', 'library',
+                        stem + '.bev')
+
+
+def _edge_size(spec, booksmart_dir):
+    """(width, height) pt of an ornament, or None if the .bev is missing."""
+    import bev
+    path = _bev_path(spec[0], booksmart_dir)
+    if not os.path.exists(path):
+        return None
+    return _svg_dims(bev.decrypt_bev(path))
+
+
+def border_pads(tb, booksmart_dir):
+    """Return (top_spec, bot_spec, pad_top, pad_bottom) for a text box.
+
+    The pads (ornament heights, in points) inset the text so it starts below a
+    top ornament and stops above a bottom one.
+    """
+    if not (tb.border and booksmart_dir):
+        return None, None, 0, 0
+    top_spec, bot_spec = _resolve_edges(tb.border)
+    pad_top = pad_bottom = 0
+    if top_spec:
+        size = _edge_size(top_spec, booksmart_dir)
+        if size:
+            pad_top = size[1]
+    if bot_spec:
+        size = _edge_size(bot_spec, booksmart_dir)
+        if size:
+            pad_bottom = size[1]
+    return top_spec, bot_spec, pad_top, pad_bottom
+
+
+def add_border_ornaments(doc, page, smgr, ctx, tb, top_spec, bot_spec,
+                         booksmart_dir, x_offset=0):
+    """Place the top/bottom border ornament shapes for a text box."""
+    import bev
+    gp = smgr.createInstanceWithContext(
+        "com.sun.star.graphic.GraphicProvider", ctx)
+    for spec, is_top in ((top_spec, True), (bot_spec, False)):
+        if not spec:
+            continue
+        stem, mirrored = spec
+        path = _bev_path(stem, booksmart_dir)
+        if not os.path.exists(path):
+            print('warning: border image %s not found, skipping' % path)
+            continue
+        svg = bev.decrypt_bev(path)
+        w, h = _svg_dims(svg)
+
+        stream = smgr.createInstanceWithContext(
+            "com.sun.star.io.SequenceInputStream", ctx)
+        stream.initialize((uno.ByteSequence(svg),))
+        graphic = gp.queryGraphic((_pv("InputStream", stream),))
+
+        shape = doc.createInstance("com.sun.star.drawing.GraphicObjectShape")
+        page.add(shape)
+        shape.Graphic = graphic
+        sw, sh = pt(w), pt(h)
+        sx = pt(tb.x + tb.width / 2.0 - w / 2.0 + x_offset)
+        sy = pt(tb.y) if is_top else pt(tb.y + tb.height - h)
+        shape.Size = Size(sw, sh)
+        shape.Position = Point(sx, sy)
+        if mirrored:
+            # reflect onto the opposite edge (top<->bottom)
+            _apply_flip(shape, sx, sy, sw, sh, False, True)
+
+
+def add_text_box_bordered(doc, page, smgr, ctx, tb, para_styles, span_styles,
+                          page_no, booksmart_dir=None, x_offset=0,
+                          valign_override=None):
+    """Add a text box plus any decorative border ornaments around it."""
+    top_spec, bot_spec, pad_top, pad_bottom = border_pads(tb, booksmart_dir)
+    add_text_box(doc, page, tb, para_styles, span_styles, page_no,
+                 x_offset=x_offset, valign_override=valign_override,
+                 pad_top=pad_top, pad_bottom=pad_bottom)
+    if top_spec or bot_spec:
+        add_border_ornaments(doc, page, smgr, ctx, tb, top_spec, bot_spec,
+                             booksmart_dir, x_offset)
 
 
 # --------------------------------------------------------------------------
 # page driver
 # --------------------------------------------------------------------------
 
-def inject_draw(doc, bs, smgr, ctx, page_limit=None):
+def inject_draw(doc, bs, smgr, ctx, page_limit=None, booksmart_dir=None):
     """Build the whole book body into ``doc`` (a DrawingDocument model).
 
     ``page_limit`` (optional) builds only the first N pages, for quick tests.
+    ``booksmart_dir`` enables decorative text-box borders (ornament .bev assets).
     """
     para_styles = {p['name']: p for p in bs.get_paragraph_styles()}
     span_styles = {s['name']: s for s in bs.get_span_styles()}
@@ -376,9 +523,11 @@ def inject_draw(doc, bs, smgr, ctx, page_limit=None):
         if pstyle is not None and pstyle['bgcolor'] != '#ffffff':
             set_page_background(doc, page, pstyle['bgcolor'])
 
-        # text boxes, then images on top (matches the .odg z-order)
+        # text boxes (with borders), then images on top (matches the .odg z-order)
         for tb in bs.text_boxes[page_id]:
-            add_text_box(doc, page, tb, para_styles, span_styles, page_no)
+            add_text_box_bordered(doc, page, smgr, ctx, tb, para_styles,
+                                  span_styles, page_no,
+                                  booksmart_dir=booksmart_dir)
         for ib in bs.images[page_id]:
             add_image(doc, page, smgr, ctx, ib)
 
@@ -412,12 +561,13 @@ def cover_spread(bs, no_flaps=False):
     return parts, total_width, height
 
 
-def inject_cover(doc, bs, smgr, ctx, no_flaps=False):
+def inject_cover(doc, bs, smgr, ctx, no_flaps=False, booksmart_dir=None):
     """Build the cover spread into ``doc`` as a single Draw page.
 
     Mirrors the ODG path of booksmart2odf.process_cover: one page sized to the
     whole print-wrap spread, parts laid left to right, each part stacking its
     background, then images, then text (so cover text sits above photos).
+    ``booksmart_dir`` enables decorative text-box borders.
     """
     if not bs.cover:
         raise ValueError("This book has no cover to convert.")
@@ -448,8 +598,10 @@ def inject_cover(doc, bs, smgr, ctx, no_flaps=False):
                 tb.x = 0
                 tb.width = part.width
                 valign_override = VC
-            add_text_box(doc, page, tb, para_styles, span_styles, 0,
-                         x_offset=x_off, valign_override=valign_override)
+            add_text_box_bordered(doc, page, smgr, ctx, tb, para_styles,
+                                  span_styles, 0, booksmart_dir=booksmart_dir,
+                                  x_offset=x_off,
+                                  valign_override=valign_override)
 
         x_off += part.width
 
@@ -494,6 +646,9 @@ def main():
                     help="build the cover spread instead of the book body")
     ap.add_argument("--no-flaps", action="store_true",
                     help="with --cover, omit the inner flaps from the spread")
+    ap.add_argument("-b", "--booksmart-dir",
+                    help="BookSmart3 program dir, to render decorative "
+                         "text-box borders (ornament .bev assets)")
     args = ap.parse_args()
 
     ctx, smgr, desktop = _connect(args.port)
@@ -507,9 +662,11 @@ def main():
     doc = desktop.loadComponentFromURL(
         "private:factory/sdraw", "_blank", 0, ())
     if args.cover:
-        inject_cover(doc, bs, smgr, ctx, no_flaps=args.no_flaps)
+        inject_cover(doc, bs, smgr, ctx, no_flaps=args.no_flaps,
+                     booksmart_dir=args.booksmart_dir)
     else:
-        inject_draw(doc, bs, smgr, ctx, page_limit=args.pages)
+        inject_draw(doc, bs, smgr, ctx, page_limit=args.pages,
+                    booksmart_dir=args.booksmart_dir)
 
     if args.output:
         out = args.output
