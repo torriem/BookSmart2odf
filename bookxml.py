@@ -945,7 +945,7 @@ class BookXML(object):
                 imagebox.width = coords[2]
                 imagebox.height = coords[3]
 
-                if len(ic.getchildren()):
+                if len(ic):
                     transform = ic[0][0]
 
                     imagebox.x = float(transform.attrib['x']) # in pts
