@@ -101,22 +101,31 @@ def make_uno_prober(smgr, ctx):
 # graphic loading (with lossless in-memory DPI patch for no-DPI files)
 # --------------------------------------------------------------------------
 
-def _patch_jfif_dpi(raw, dpi=300):
-    """Return JFIF-DPI-patched bytes, or None if not a patchable JFIF JPEG.
+def _patch_jpeg_dpi(raw, dpi=300):
+    """Return DPI-stamped JPEG bytes, or None if ``raw`` is not a JPEG.
 
-    Metadata-only: sets the APP0 density units to dpi and X/Y density to
-    ``dpi``.  No pixel re-encode, no length change.  The input buffer is only
-    read.
+    Metadata-only, no pixel re-encode.  Two cases:
+
+      * a JFIF APP0 already present -> patch its density in place (5 bytes).
+      * otherwise (e.g. an EXIF-only JPEG, which has no JFIF APP0) -> splice an
+        18-byte JFIF APP0 right after SOI.  LO honours the JFIF density over
+        EXIF, so Size100thMM becomes a concrete, readable square-DPI natural
+        size we can crop against.
+
+    The input buffer is only read.
     """
     if raw[0:2] != b'\xff\xd8':
         return None
     if raw[2:4] == b'\xff\xe0' and raw[6:11] == b'JFIF\x00':
         data = bytearray(raw)
-        data[13] = 1
-        data[14:16] = dpi.to_bytes(2, 'big')
-        data[16:18] = dpi.to_bytes(2, 'big')
+        data[13] = 1                              # units = dots/inch
+        data[14:16] = dpi.to_bytes(2, 'big')      # Xdensity
+        data[16:18] = dpi.to_bytes(2, 'big')      # Ydensity
         return bytes(data)
-    return None
+    # JPEG with no JFIF APP0: splice a minimal one in after the SOI marker.
+    app0 = (b'\xff\xe0\x00\x10JFIF\x00\x01\x01\x01'
+            + dpi.to_bytes(2, 'big') + dpi.to_bytes(2, 'big') + b'\x00\x00')
+    return raw[0:2] + app0 + raw[2:]
 
 
 def load_graphic(smgr, ctx, filepath):
@@ -134,7 +143,7 @@ def load_graphic(smgr, ctx, filepath):
     if mm.Width == 0 or mm.Height == 0:
         with open(filepath, 'rb') as fh:
             raw = fh.read()
-        patched = _patch_jfif_dpi(raw)
+        patched = _patch_jpeg_dpi(raw)
         if patched is not None:
             stream = smgr.createInstanceWithContext(
                 "com.sun.star.io.SequenceInputStream", ctx)
@@ -213,17 +222,35 @@ def _apply_char_props(cursor, eff):
     _set(cursor, CharUnderline=SINGLE if eff.get('underline') else UL_NONE)
 
 
-def add_text_box(doc, page, tb, para_styles, span_styles, page_no):
-    """A BookSmart text box -> a Draw TextShape with styled paragraphs."""
+def add_text_box(doc, page, tb, para_styles, span_styles, page_no,
+                 x_offset=0, valign_override=None):
+    """A BookSmart text box -> a Draw TextShape with styled paragraphs.
+
+    ``x_offset`` shifts the box right (used to lay cover parts side by side).
+    ``valign_override`` (a TextVerticalAdjust value) forces vertical alignment,
+    e.g. centred spine text.
+    """
     shape = doc.createInstance("com.sun.star.drawing.TextShape")
-    shape.Size = Size(pt(tb.width), pt(tb.height))
-    shape.Position = Point(pt(tb.x), pt(tb.y))
+    if tb.rotation in (90, 270):
+        # A rotated TextShape lays its text out in the UNROTATED size, then
+        # rotates the result -- so for quarter turns the layout box must be
+        # swapped (text flows along the box's long axis) and the shape placed so
+        # its centre stays on the box centre (Draw rotates about the centre).
+        w100, h100 = pt(tb.height), pt(tb.width)
+        cx = pt(tb.x + x_offset + tb.width / 2.0)
+        cy = pt(tb.y + tb.height / 2.0)
+        shape.Size = Size(w100, h100)
+        shape.Position = Point(cx - w100 // 2, cy - h100 // 2)
+    else:
+        shape.Size = Size(pt(tb.width), pt(tb.height))
+        shape.Position = Point(pt(tb.x + x_offset), pt(tb.y))
     page.add(shape)
 
     _set(shape, TextAutoGrowHeight=False, TextAutoGrowWidth=False,
          TextLeftDistance=0, TextRightDistance=0,
          TextUpperDistance=0, TextLowerDistance=0)
-    valign = TEXT_VADJUST.get(tb.valign)
+    valign = valign_override if valign_override is not None \
+        else TEXT_VADJUST.get(tb.valign)
     if valign is not None:
         _set(shape, TextVerticalAdjust=valign)
     if tb.rotation:
@@ -256,7 +283,12 @@ def add_text_box(doc, page, tb, para_styles, span_styles, page_no):
                 # TODO: live page-number field; static for now
                 text.insertString(cursor, str(page_no + 1), False)
             else:
-                text.insertString(cursor, s.text or '', False)
+                # BookSmart spans carry literal newlines as paragraph
+                # terminators.  In ODF those are insignificant whitespace, but
+                # insertString treats them as line breaks -- strip them so the
+                # real line structure comes only from the paragraph list.
+                clean = (s.text or '').replace('\r', '').replace('\n', '')
+                text.insertString(cursor, clean, False)
     return shape
 
 
@@ -353,6 +385,77 @@ def inject_draw(doc, bs, smgr, ctx, page_limit=None):
     return doc
 
 
+# print-wrap order of cover parts, left to right (mirrors booksmart2odf)
+COVER_PRINT_ORDER = ['Back Flap', 'Back Cover', 'Spine', 'Front Cover',
+                     'Front Flap']
+
+
+def cover_spread(bs, no_flaps=False):
+    """Return (ordered_parts, total_width, height) for the print-wrap spread.
+
+    ``no_flaps`` drops the inner flap parts (wrapped hardcover / softcover).
+    Mirrors booksmart2odf.cover_spread (reimplemented here so the backend stays
+    free of the ezodf/lxml import).
+    """
+    parts = bs.cover
+    if no_flaps:
+        parts = [p for p in parts if 'Flap' not in p.title]
+
+    def order(part):
+        try:
+            return COVER_PRINT_ORDER.index(part.title)
+        except ValueError:
+            return len(COVER_PRINT_ORDER)
+    parts = sorted(parts, key=order)
+    total_width = sum(p.width for p in parts)
+    height = max(p.height for p in parts)
+    return parts, total_width, height
+
+
+def inject_cover(doc, bs, smgr, ctx, no_flaps=False):
+    """Build the cover spread into ``doc`` as a single Draw page.
+
+    Mirrors the ODG path of booksmart2odf.process_cover: one page sized to the
+    whole print-wrap spread, parts laid left to right, each part stacking its
+    background, then images, then text (so cover text sits above photos).
+    """
+    if not bs.cover:
+        raise ValueError("This book has no cover to convert.")
+
+    para_styles = {p['name']: p for p in bs.get_paragraph_styles()}
+    span_styles = {s['name']: s for s in bs.get_span_styles()}
+
+    parts, total_width, height = cover_spread(bs, no_flaps)
+
+    page = doc.DrawPages.getByIndex(0)
+    page.Width = pt(total_width)
+    page.Height = pt(height)
+    _set(page, BorderLeft=0, BorderRight=0, BorderTop=0, BorderBottom=0)
+
+    x_off = 0
+    for part in parts:
+        # per-part background (a cover page mixes several part colours, so this
+        # is a rectangle, not the single per-page Background fill)
+        add_bg_rect(doc, page, part.width, part.height, part.bgcolor, x=x_off)
+
+        for ib in part.images:
+            add_image(doc, page, smgr, ctx, ib, x_offset=x_off)
+
+        for tb in part.text_boxes:
+            valign_override = None
+            if tb.rotation in (90, 270):
+                # rotated (spine) text: span the full part width, centre it
+                tb.x = 0
+                tb.width = part.width
+                valign_override = VC
+            add_text_box(doc, page, tb, para_styles, span_styles, 0,
+                         x_offset=x_off, valign_override=valign_override)
+
+        x_off += part.width
+
+    return doc
+
+
 # --------------------------------------------------------------------------
 # standalone runner (headless soffice socket) -- not used by the filter
 # --------------------------------------------------------------------------
@@ -387,6 +490,10 @@ def main():
     ap.add_argument("-p", "--port", type=int, default=2002)
     ap.add_argument("-o", "--output", help="output .odg (default: <book>.odg)")
     ap.add_argument("--pages", type=int, help="only build the first N pages")
+    ap.add_argument("--cover", action="store_true",
+                    help="build the cover spread instead of the book body")
+    ap.add_argument("--no-flaps", action="store_true",
+                    help="with --cover, omit the inner flaps from the spread")
     args = ap.parse_args()
 
     ctx, smgr, desktop = _connect(args.port)
@@ -399,9 +506,17 @@ def main():
 
     doc = desktop.loadComponentFromURL(
         "private:factory/sdraw", "_blank", 0, ())
-    inject_draw(doc, bs, smgr, ctx, page_limit=args.pages)
+    if args.cover:
+        inject_cover(doc, bs, smgr, ctx, no_flaps=args.no_flaps)
+    else:
+        inject_draw(doc, bs, smgr, ctx, page_limit=args.pages)
 
-    out = args.output or (os.path.splitext(args.book_file)[0] + ".odg")
+    if args.output:
+        out = args.output
+    elif args.cover:
+        out = os.path.splitext(args.book_file)[0] + " cover.odg"
+    else:
+        out = os.path.splitext(args.book_file)[0] + ".odg"
     doc.storeToURL(uno.systemPathToFileUrl(os.path.abspath(out)),
                    (_pv("FilterName", "draw8"),))
     doc.close(False)
