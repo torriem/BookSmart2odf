@@ -5,7 +5,7 @@ DES (ECB, PKCS5 padding) using the key `blurbboo`.  The decorative border
 ("frame") assets decrypt to SVG.  See BEV_FORMAT.md for the full write-up.
 """
 
-import lxml.etree
+import xml.etree.ElementTree as ET
 from Crypto.Cipher import DES
 
 # DESKeySpec("blurbbooks") uses only the first 8 bytes -> "blurbboo"
@@ -42,7 +42,7 @@ def svg_dimensions(svg_bytes):
     BookSmart treats SVG user units as points, so the root width/height (or
     the viewBox extents as a fallback) map directly to points.
     """
-    root = lxml.etree.fromstring(svg_bytes)
+    root = ET.fromstring(svg_bytes)
 
     width = root.get('width')
     height = root.get('height')
@@ -58,6 +58,13 @@ def svg_dimensions(svg_bytes):
 
 
 _SVG_NS = 'http://www.w3.org/2000/svg'
+_XLINK_NS = 'http://www.w3.org/1999/xlink'
+
+# Serialize SVG with its conventional prefixes (default xmlns for SVG, "xlink"
+# for hrefs) instead of ElementTree's auto-generated ns0/ns1.  register_namespace
+# is process-global, but this module is the only place that emits SVG.
+ET.register_namespace('', _SVG_NS)
+ET.register_namespace('xlink', _XLINK_NS)
 
 
 def flip_svg_vertical(svg_bytes):
@@ -67,7 +74,7 @@ def flip_svg_vertical(svg_bytes):
     we bake the flip into the SVG itself by wrapping all content in a group with
     a vertical-flip transform.
     """
-    root = lxml.etree.fromstring(svg_bytes)
+    root = ET.fromstring(svg_bytes)
 
     viewbox = root.get('viewBox')
     if viewbox:
@@ -75,10 +82,11 @@ def flip_svg_vertical(svg_bytes):
     else:
         height = _strip_unit(root.get('height'))
 
-    group = root.makeelement('{%s}g' % _SVG_NS,
-                             {'transform': 'matrix(1,0,0,-1,0,%g)' % height})
+    group = ET.Element('{%s}g' % _SVG_NS,
+                       {'transform': 'matrix(1,0,0,-1,0,%g)' % height})
     for child in list(root):
-        group.append(child)  # moves the child out of root and into the group
+        root.remove(child)   # ET append does not reparent, so detach first
+        group.append(child)
     root.append(group)
 
-    return lxml.etree.tostring(root, xml_declaration=True, encoding='utf-8')
+    return ET.tostring(root, xml_declaration=True, encoding='utf-8')
