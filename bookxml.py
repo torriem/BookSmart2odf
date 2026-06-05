@@ -1,8 +1,26 @@
 import os
 import xml.etree.ElementTree as ET
-import PIL.Image
 import tempfile
 import subprocess
+
+
+def _pillow_probe(filepath):
+    """Default image prober: return (format, (w, h) pixels, (xdpi, ydpi)).
+
+    Uses Pillow.  The image-introspection seam is factored out here so the
+    LibreOffice UNO import filter can replace ``bookxml.probe_image`` with a
+    GraphicProvider-based prober and run with neither Pillow nor exiftool
+    installed (LibreOffice's bundled Python ships neither).
+    """
+    import PIL.Image
+    image = PIL.Image.open(filepath)
+    dpi = image.info.get('dpi', (72, 72))
+    return image.format.lower(), image.size, dpi
+
+
+# Overridable seam: assign a replacement callable to introspect images without
+# Pillow.  The CLI converter keeps the default Pillow prober.
+probe_image = _pillow_probe
 
 class TextBox(object):
     def __init__(self, xmlre = None):
@@ -87,14 +105,7 @@ class ImageBox(object):
 
     def __init__(self, filepath):
         self.filename = filepath
-        image = PIL.Image.open(filepath)
-        if 'dpi' in image.info:
-            self.dpi = image.info['dpi']
-        else:
-            self.dpi = (72, 72)
-
-        self.format = image.format.lower()
-        self.img_size = image.size
+        self.format, self.img_size, self.dpi = probe_image(filepath)
         self.box_x = 0
         self.box_y = 0
         self.width = 0
@@ -190,6 +201,7 @@ class ImageBox(object):
         exiftool did) and re-encodes reusing the original quantization tables
         (visually near-lossless).  Other formats just get the dpi metadata.
         """
+        import PIL.Image
         image = PIL.Image.open(self.filename)
         image.load() # decode before we possibly overwrite the source (OVERWRITE)
         fmt = image.format or self.format.upper()
@@ -290,6 +302,7 @@ class ImageBox(object):
         self.crop_right = crop_right / self.dpi[0]
 
     def crop_file(self):
+        import PIL.Image
         # just assume a default of 300x300
         self.dpi = (300,300)
         self.calculate_crop()
@@ -932,7 +945,7 @@ class BookXML(object):
                 imagebox.width = coords[2]
                 imagebox.height = coords[3]
 
-                if len(ic.getchildren()):
+                if len(ic):
                     transform = ic[0][0]
 
                     imagebox.x = float(transform.attrib['x']) # in pts
