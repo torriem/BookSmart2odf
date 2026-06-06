@@ -696,6 +696,11 @@ class WriterBackend(Backend):
              TopBorderDistance=0, BottomBorderDistance=0,
              FrameIsAutomaticHeight=False,
              SizeType=uno.getConstantByName("com.sun.star.text.SizeType.FIX"))
+        # vertical alignment of the text within the (fixed-height) frame
+        valign = valign_override if valign_override is not None \
+            else TEXT_VADJUST.get(tb.valign)
+        if valign is not None:
+            _set(frame, TextVerticalAdjust=valign)
         fill_text(frame.Text, tb, self.para_styles, self.span_styles, page_no,
                   page_number_field=self._page_number_field)
         return frame
