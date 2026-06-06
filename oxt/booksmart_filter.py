@@ -3,8 +3,9 @@
 A passive Python UNO component.  LibreOffice detects a .book file (see
 Types.xcu / Filters.xcu), creates an empty Writer document, then calls
 ``setTargetDocument()`` and ``filter()``; we parse the .book with the
-BookSmart2odf parser and inject it into that document via the UNO Writer
-backend -- the combined cover spread as page 1, then the body pages.
+BookSmart2odf parser and inject the body pages into that document via the UNO
+Writer backend.  The combined cover spread is deliberately not imported (the
+cover code path stays available for the CLI/standalone runner).
 
 No Pillow / lxml / exiftool are needed: the parser's image probe is swapped for
 a GraphicProvider-based one, and images load through GraphicProvider.  The
@@ -115,12 +116,14 @@ class WriterImportFilter(unohelper.Base, XFilter, XImporter,
             bookxml.probe_image = unobuild.make_uno_prober(self.smgr, self.ctx)
             bs = bookxml.BookXML(path)
             backend = unobuild.WriterBackend(self.target, self.smgr, self.ctx)
-            # Suppress view/layout updates while we bulk-build the model; during
-            # a live GUI import the layout engine reacting to each change is slow
-            # and can crash the office.
+            # Body pages only -- the cover spread is deliberately not imported
+            # (inject_book/inject_cover remain available for the CLI).  Suppress
+            # view/layout updates while we bulk-build the model; during a live
+            # GUI import the layout engine reacting to each change is slow and
+            # can crash the office.
             self.target.lockControllers()
             try:
-                unobuild.inject_book(backend, bs)
+                unobuild.inject(backend, bs)
             finally:
                 self.target.unlockControllers()
             # Freshly imported -> not "modified"; Save then offers Save As to a
