@@ -679,6 +679,10 @@ class WriterBackend(Backend):
 
     def text_box(self, tb, page_no, x_offset=0, valign_override=None,
                  pad_top=0, pad_bottom=0):
+        if tb.rotation in (90, 270):
+            # Writer text frames can't rotate; use a rotatable drawing shape.
+            return self._rotated_text_shape(tb, page_no, x_offset,
+                                            valign_override)
         frame = self.doc.createInstance("com.sun.star.text.TextFrame")
         self._anchor(frame, tb.x + x_offset, tb.y + pad_top, tb.width,
                      tb.height - pad_top - pad_bottom)
@@ -692,10 +696,43 @@ class WriterBackend(Backend):
              TopBorderDistance=0, BottomBorderDistance=0,
              FrameIsAutomaticHeight=False,
              SizeType=uno.getConstantByName("com.sun.star.text.SizeType.FIX"))
-        # TODO: rotated (spine) text and vertical alignment in Writer frames
         fill_text(frame.Text, tb, self.para_styles, self.span_styles, page_no,
                   page_number_field=self._page_number_field)
         return frame
+
+    def _rotated_text_shape(self, tb, page_no, x_offset, valign_override):
+        """Spine (quarter-turn) text via a rotatable drawing TextShape anchored
+        to the page -- Writer frames can't rotate.  Same geometry as the Draw
+        backend: swap the layout box (text flows along the long axis) and centre
+        it on the box centre, which Draw rotates about."""
+        shape = self.doc.createInstance("com.sun.star.drawing.TextShape")
+        self.doc.DrawPage.add(shape)
+        w100, h100 = pt(tb.height), pt(tb.width)
+        cx = pt(tb.x + x_offset + tb.width / 2.0)
+        cy = pt(tb.y + tb.height / 2.0)
+        shape.AnchorType = self._AT_PAGE
+        _set(shape, AnchorPageNo=self._phys + 1,
+             HoriOrient=self._HORI_NONE, VertOrient=self._VERT_NONE,
+             HoriOrientRelation=self._PAGE_FRAME,
+             VertOrientRelation=self._PAGE_FRAME)
+        shape.Size = Size(w100, h100)
+        _set(shape, HoriOrientPosition=cx - w100 // 2,
+             VertOrientPosition=cy - h100 // 2,
+             RotateAngle=int((360 - tb.rotation) % 360) * 100,
+             # foreground layer, else the opaque spine background frame hides it
+             Opaque=True,
+             FillStyle=uno.Enum("com.sun.star.drawing.FillStyle", "NONE"),
+             LineStyle=uno.Enum("com.sun.star.drawing.LineStyle", "NONE"),
+             TextAutoGrowHeight=False, TextAutoGrowWidth=False,
+             TextLeftDistance=0, TextRightDistance=0,
+             TextUpperDistance=0, TextLowerDistance=0)
+        valign = valign_override if valign_override is not None \
+            else TEXT_VADJUST.get(tb.valign)
+        if valign is not None:
+            _set(shape, TextVerticalAdjust=valign)
+        # drawing shape: $PageNumber as static text (like Draw), no live field
+        fill_text(shape.Text, tb, self.para_styles, self.span_styles, page_no)
+        return shape
 
     def _page_number_field(self, xtext, cursor):
         """Insert a live current-page-number field (arabic), offset so book
