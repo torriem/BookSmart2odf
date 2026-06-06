@@ -10,6 +10,10 @@ No Pillow / lxml / exiftool are needed: the parser's image probe is swapped for
 a GraphicProvider-based one, and images load through GraphicProvider.  The
 helper modules (bookxml.py, unobuild.py) ship alongside this file in the .oxt.
 
+There is no .book *export* filter, so the imported document can't be written
+back to .book: File > Save offers Save As to a native format.  We clear the
+modified flag after import so a freshly opened book isn't flagged as unsaved.
+
 Decorative text-box borders are intentionally not rendered here: they need the
 encrypted .bev assets from a BookSmart3 install, which an import filter has no
 reliable way to locate (booksmart_dir is left None).
@@ -19,26 +23,14 @@ import os
 import sys
 import traceback
 
-# The component runs in LibreOffice's bundled Python with no console, so on
-# failure log to a fixed, predictable path (not the temp dir -- LibreOffice
-# points TMPDIR at its own location) so an import error is diagnosable.
-_LOG = os.path.expanduser("~/booksmart_filter.log")
-
-
-def _log(msg):
-    try:
-        with open(_LOG, "a") as fh:
-            fh.write(msg + "\n")
-    except Exception:
-        pass
-
-
 import uno
 import unohelper
 from com.sun.star.beans import PropertyValue
 from com.sun.star.document import (XFilter, XImporter,
                                    XExtendedFilterDetection)
 from com.sun.star.lang import XServiceInfo
+from com.sun.star.logging.LogLevel import SEVERE
+
 # The helper modules ship next to this component inside the extension; make the
 # extension directory importable so the imports below resolve.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -61,6 +53,17 @@ class WriterImportFilter(unohelper.Base, XFilter, XImporter,
         self.ctx = ctx
         self.smgr = ctx.ServiceManager
         self.target = None
+
+    def _log_error(self, msg):
+        """Report a failure through LibreOffice's logging framework
+        (com.sun.star.logging); a no-op if logging is unavailable/disabled, so
+        it can never break the import."""
+        try:
+            pool = self.ctx.getValueByName(
+                "/singletons/com.sun.star.logging.theLoggerPool")
+            pool.getNamedLogger("org.booksmart2odf.import").log(SEVERE, msg)
+        except Exception:
+            pass
 
     # --- XExtendedFilterDetection: claim .book files by content, so LO routes
     # them to us instead of treating them as generic XML ---
@@ -90,7 +93,7 @@ class WriterImportFilter(unohelper.Base, XFilter, XImporter,
                 result = tuple(descriptor) + (p,)
             return TYPE_NAME, result
         except Exception:
-            _log("detect failed:\n" + traceback.format_exc())
+            self._log_error("detection failed:\n" + traceback.format_exc())
             return "", descriptor
 
     # --- XImporter: framework hands us the empty Writer model first ---
@@ -120,9 +123,12 @@ class WriterImportFilter(unohelper.Base, XFilter, XImporter,
                 unobuild.inject_book(backend, bs)
             finally:
                 self.target.unlockControllers()
+            # Freshly imported -> not "modified"; Save then offers Save As to a
+            # native format (there is no .book export filter to write back to).
+            self.target.setModified(False)
             return True
         except Exception:
-            _log("import failed:\n" + traceback.format_exc())
+            self._log_error("import failed:\n" + traceback.format_exc())
             return False
 
     def cancel(self):
