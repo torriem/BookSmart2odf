@@ -1,0 +1,4 @@
+Opens BookSmart .book files directly in LibreOffice Writer: the combined cover
+spread as the first page, followed by the body pages. Text, images (with
+BookSmart's zoom/pan/crop and mirroring) and page backgrounds are reproduced.
+Decorative text-box borders are not rendered.

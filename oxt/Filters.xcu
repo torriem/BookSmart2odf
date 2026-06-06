@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:component-data xmlns:oor="http://openoffice.org/2001/registry"
+                    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    oor:name="Filter" oor:package="org.openoffice.Office">
+  <node oor:name="Filters">
+    <node oor:name="booksmart_writer_import" oor:op="replace">
+      <prop oor:name="Flags"><value>IMPORT ALIEN 3RDPARTYFILTER</value></prop>
+      <prop oor:name="UIComponent"><value/></prop>
+      <prop oor:name="FilterService">
+        <value>org.booksmart2odf.WriterImportFilter</value>
+      </prop>
+      <prop oor:name="UserData"><value/></prop>
+      <prop oor:name="FileFormatVersion"><value>0</value></prop>
+      <prop oor:name="Type"><value>booksmart_Book</value></prop>
+      <prop oor:name="TemplateName"><value/></prop>
+      <prop oor:name="DocumentService">
+        <value>com.sun.star.text.TextDocument</value>
+      </prop>
+      <prop oor:name="UIName">
+        <value xml:lang="en-US">BookSmart Book (Writer)</value>
+      </prop>
+    </node>
+  </node>
+</oor:component-data>
