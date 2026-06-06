@@ -221,8 +221,8 @@ def emit_text_styles(bodf, bs):
             # BookSmart specified extra line spacing; honor it
             sp_p.attrib[ns('fo:line-height')] = '%d%%' % ((ps['line_spacing'] + 1) * 100)
         else:
-            # BookSmart didn't specify spacing; default frame text to 1.15
-            sp_p.attrib[ns('fo:line-height')] = '115%'
+            # BookSmart didn't specify spacing; default frame text to 1
+            sp_p.attrib[ns('fo:line-height')] = '100%'
         sp_p.attrib[ns('fo:margin-left')] = '%dpt' % ps['left_indent']
 
         ss.append(sp_p)
