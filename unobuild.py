@@ -1,23 +1,27 @@
-"""UNO Draw backend: inject a parsed BookSmart book into a live LibreOffice
-Drawing document via the UNO API, instead of writing ODF XML.
+"""UNO backend: inject a parsed BookSmart book into a live LibreOffice document
+via the UNO API, instead of writing ODF XML.
 
-This mirrors the .odg path in ``booksmart2odf.process_odg_pages`` /
-``odfbuild.build_*`` but drives a ``com.sun.star.drawing.DrawingDocument``
-model directly.  It is the backend the import filter will call; a small
-``__main__`` lets it run standalone against a headless ``soffice`` socket so we
-can iterate without packaging an .oxt.
+Two backends share one driver: :class:`DrawBackend` builds a Drawing (ODG) model
+and :class:`WriterBackend` a Text (ODT) model.  Everything format-neutral --
+geometry/colour conversion, the image prober and loader, crop maths, character
+styling and the paragraph/span text fill, border ornament resolution, the cover
+spread -- lives at module level or on the :class:`Backend` base; each subclass
+implements only the handful of operations that genuinely differ (document
+factory, page setup, and creating/positioning the text/image/background shapes).
 
-Design notes (see import_filter_plan.md, Phase 2):
-  * BookSmart geometry is in points; the Draw API is 1/100 mm -> ``pt()``.
+The import filter (future) picks the backend matching the model LibreOffice
+hands it: a DrawingDocument -> DrawBackend, a TextDocument -> WriterBackend.  A
+small ``__main__`` runs either standalone against a headless ``soffice`` socket
+(``-f odg`` / ``-f odt``) so we can iterate without packaging an .oxt.
+
+Design notes (see import_filter_plan.md):
+  * BookSmart geometry is in points; the UNO API is 1/100 mm -> ``pt()``.
   * No Pillow/exiftool: ``bookxml.probe_image`` is replaced with a
     GraphicProvider-based prober (pixel size only).
-  * Image sizing is explicit via ``shape.Size``; cropping via ``GraphicCrop``
-    computed as a pixel fraction of LO's own natural size.  Files with no
-    embedded DPI get a lossless in-memory JFIF density patch so Size100thMM is
-    readable -- the originals on disk are never touched.
-
-Deferred for a later pass: decorative text-box borders, the cover spread,
-image mirroring (vflip/hflip), and live page-number fields.
+  * Image sizing is explicit; cropping via ``GraphicCrop`` computed as a pixel
+    fraction of LO's own natural size.  Files with no embedded DPI get a
+    lossless in-memory JFIF density patch so Size100thMM is readable -- the
+    originals on disk are never touched.
 """
 
 import os
@@ -30,8 +34,7 @@ from com.sun.star.awt.FontWeight import BOLD, NORMAL
 from com.sun.star.awt.FontSlant import ITALIC, NONE as SLANT_NONE
 from com.sun.star.awt.FontUnderline import SINGLE, NONE as UL_NONE
 from com.sun.star.style.ParagraphAdjust import LEFT, RIGHT, CENTER, BLOCK
-from com.sun.star.drawing.TextVerticalAdjust import (
-    TOP, CENTER as VC, BOTTOM)
+from com.sun.star.drawing.TextVerticalAdjust import TOP, CENTER as VC, BOTTOM
 
 import bookxml
 
@@ -39,7 +42,7 @@ PT_TO_MM100 = 2540.0 / 72.0
 
 
 def pt(points):
-    """BookSmart points -> Draw 1/100 mm."""
+    """BookSmart points -> 1/100 mm."""
     return int(round(points * PT_TO_MM100))
 
 
@@ -57,6 +60,15 @@ def _pv(name, value):
     return p
 
 
+def _set(obj, **props):
+    """setPropertyValue for each, ignoring ones the object doesn't support."""
+    for name, value in props.items():
+        try:
+            obj.setPropertyValue(name, value)
+        except Exception:
+            pass
+
+
 # BookSmart ParagraphStyle.ALIGN enum -> UNO ParagraphAdjust
 PARA_ADJUST = {0: LEFT, 1: CENTER, 2: RIGHT, 3: BLOCK}
 # BookSmart text-box 'va' -> UNO TextVerticalAdjust (absent/0 == top)
@@ -68,6 +80,9 @@ _MIME_FORMAT = {
     'image/tiff': 'tiff', 'image/bmp': 'bmp',
 }
 
+_PARA_BREAK = uno.getConstantByName(
+    "com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK")
+
 
 # --------------------------------------------------------------------------
 # image introspection seam (replaces Pillow)
@@ -76,10 +91,10 @@ _MIME_FORMAT = {
 def make_uno_prober(smgr, ctx):
     """Return a ``probe_image`` replacement backed by GraphicProvider.
 
-    Returns ``(format, (w, h) pixels, (xdpi, ydpi))``.  The DPI is a dummy:
-    the Draw backend sizes images explicitly and derives the crop from a pixel
-    fraction, so the source DPI never enters the math.  Raises FileNotFoundError
-    for a missing file so ImageBox's ``.original`` fallback still works.
+    Returns ``(format, (w, h) pixels, (xdpi, ydpi))``.  The DPI is a dummy: the
+    backends size images explicitly and derive the crop from a pixel fraction,
+    so the source DPI never enters the math.  Raises FileNotFoundError for a
+    missing file so ImageBox's ``.original`` fallback still works.
     """
     gp = smgr.createInstanceWithContext(
         "com.sun.star.graphic.GraphicProvider", ctx)
@@ -154,47 +169,28 @@ def load_graphic(smgr, ctx, filepath):
     return graphic, mm, graphic.SizePixel
 
 
-# --------------------------------------------------------------------------
-# shape builders
-# --------------------------------------------------------------------------
+def graphic_crop(ib, mm, px):
+    """Build a com.sun.star.text.GraphicCrop for an image box.
 
-def _set(obj, **props):
-    """setPropertyValue for each, ignoring ones the shape doesn't support."""
-    for name, value in props.items():
-        try:
-            obj.setPropertyValue(name, value)
-        except Exception:
-            pass
-
-
-def set_page_background(doc, page, color):
-    """Set a drawing-page solid background fill on ``page``.
-
-    This is the faithful equivalent of the CLI's drawing-page-properties
-    ``draw:fill``/``draw:fill-color`` (ODG has no Writer-style page styles).
-    ``com.sun.star.drawing.Background`` is the instantiable fill bag; assigned
-    to the page's ``Background`` property it round-trips to the same ODF.
+    The crop is a pure pixel fraction (DPI-free): setting ib.dpi to the pixel
+    dims makes calculate_crop() emit crop_* directly as fractions, which we
+    scale by LO's own natural size (Size100thMM, or a 96-dpi fallback).
     """
-    bg = doc.createInstance("com.sun.star.drawing.Background")
-    bg.setPropertyValue(
-        "FillStyle", uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"))
-    bg.setPropertyValue("FillColor", color_to_int(color))
-    page.Background = bg
+    ib.dpi = (px.Width or 1, px.Height or 1)
+    ib.calculate_crop()
+    nat_w = mm.Width if mm.Width else int(px.Width / 96.0 * 2540)
+    nat_h = mm.Height if mm.Height else int(px.Height / 96.0 * 2540)
+    crop = uno.createUnoStruct("com.sun.star.text.GraphicCrop")
+    crop.Left = int(ib.crop_left * nat_w)
+    crop.Right = int(ib.crop_right * nat_w)
+    crop.Top = int(ib.crop_top * nat_h)
+    crop.Bottom = int(ib.crop_bottom * nat_h)
+    return crop
 
 
-def add_bg_rect(doc, page, width, height, color, x=0, y=0):
-    """Solid background rectangle, for per-part cover backgrounds (a cover page
-    holds several differently-coloured parts, so those can't use the single
-    per-page background fill)."""
-    rect = doc.createInstance("com.sun.star.drawing.RectangleShape")
-    rect.Size = Size(pt(width), pt(height))
-    rect.Position = Point(pt(x), pt(y))
-    page.add(rect)
-    _set(rect, FillStyle=uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"),
-         FillColor=color_to_int(color),
-         LineStyle=uno.Enum("com.sun.star.drawing.LineStyle", "NONE"))
-    return rect
-
+# --------------------------------------------------------------------------
+# shared text styling / fill (works on any XText: Draw shape or Writer frame)
+# --------------------------------------------------------------------------
 
 def _effective_char_props(para_style, span_style):
     """Merge a paragraph style with a span style (span overrides non-None)."""
@@ -223,56 +219,21 @@ def _apply_char_props(cursor, eff):
     _set(cursor, CharUnderline=SINGLE if eff.get('underline') else UL_NONE)
 
 
-def add_text_box(doc, page, tb, para_styles, span_styles, page_no,
-                 x_offset=0, valign_override=None, pad_top=0, pad_bottom=0):
-    """A BookSmart text box -> a Draw TextShape with styled paragraphs.
+def fill_text(xtext, tb, para_styles, span_styles, page_no,
+              page_number_field=None):
+    """Fill an XText (Draw TextShape.Text or a Writer frame's Text) with tb's
+    styled paragraphs.  Container creation/positioning is the backend's job;
+    this is the format-neutral content.
 
-    ``x_offset`` shifts the box right (used to lay cover parts side by side).
-    ``valign_override`` (a TextVerticalAdjust value) forces vertical alignment,
-    e.g. centred spine text.  ``pad_top``/``pad_bottom`` (points) inset the text
-    so it clears top/bottom border ornaments -- applied geometrically (shrink the
-    box) rather than via TextUpper/LowerDistance, which Draw does not reliably
-    honour for text placement on a TextShape.
+    ``page_number_field(xtext, cursor)`` inserts a live page-number field for a
+    ``$PageNumber`` variable (Writer); when None a static number is written
+    (Draw, where a live field is not reliably rendered).
     """
-    shape = doc.createInstance("com.sun.star.drawing.TextShape")
-    if tb.rotation in (90, 270):
-        # A rotated TextShape lays its text out in the UNROTATED size, then
-        # rotates the result -- so for quarter turns the layout box must be
-        # swapped (text flows along the box's long axis) and the shape placed so
-        # its centre stays on the box centre (Draw rotates about the centre).
-        w100, h100 = pt(tb.height), pt(tb.width)
-        cx = pt(tb.x + x_offset + tb.width / 2.0)
-        cy = pt(tb.y + tb.height / 2.0)
-        shape.Size = Size(w100, h100)
-        shape.Position = Point(cx - w100 // 2, cy - h100 // 2)
-    else:
-        # inset top/bottom for border ornaments by shrinking the box itself
-        shape.Size = Size(pt(tb.width), pt(tb.height - pad_top - pad_bottom))
-        shape.Position = Point(pt(tb.x + x_offset), pt(tb.y + pad_top))
-    page.add(shape)
-
-    _set(shape, TextAutoGrowHeight=False, TextAutoGrowWidth=False,
-         TextLeftDistance=0, TextRightDistance=0,
-         TextUpperDistance=0, TextLowerDistance=0)
-    valign = valign_override if valign_override is not None \
-        else TEXT_VADJUST.get(tb.valign)
-    if valign is not None:
-        _set(shape, TextVerticalAdjust=valign)
-    if tb.rotation:
-        # UNO RotateAngle is 1/100 deg, counter-clockwise; BookSmart is clockwise
-        _set(shape, RotateAngle=int((360 - tb.rotation) % 360) * 100)
-
-    text = shape.Text
-    text.setString("")
-    cursor = text.createTextCursor()
-
+    xtext.setString("")
+    cursor = xtext.createTextCursor()
     for pi, para in enumerate(tb.paragraphs):
         if pi > 0:
-            text.insertControlCharacter(
-                cursor,
-                uno.getConstantByName(
-                    "com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK"),
-                False)
+            xtext.insertControlCharacter(cursor, _PARA_BREAK, False)
         ps = para_styles.get(para.style)
         if ps is not None:
             _set(cursor, ParaAdjust=PARA_ADJUST.get(ps['alignment'], LEFT))
@@ -282,23 +243,24 @@ def add_text_box(doc, page, tb, para_styles, span_styles, page_no,
         for s in para.spans:
             if s.variable and not (s.text or '').strip():
                 continue
-            eff = _effective_char_props(ps, span_styles.get(s.style))
-            _apply_char_props(cursor, eff)
+            _apply_char_props(cursor, _effective_char_props(
+                ps, span_styles.get(s.style)))
             if s.variable == '$PageNumber':
-                # TODO: live page-number field; static for now
-                text.insertString(cursor, str(page_no + 1), False)
+                if page_number_field is not None:
+                    page_number_field(xtext, cursor)
+                else:
+                    xtext.insertString(cursor, str(page_no + 1), False)
             else:
                 # BookSmart spans carry literal newlines as paragraph
                 # terminators.  In ODF those are insignificant whitespace, but
                 # insertString treats them as line breaks -- strip them so the
                 # real line structure comes only from the paragraph list.
                 clean = (s.text or '').replace('\r', '').replace('\n', '')
-                text.insertString(cursor, clean, False)
-    return shape
+                xtext.insertString(cursor, clean, False)
 
 
 def _apply_flip(shape, x, y, w, h, hflip, vflip):
-    """Mirror a shape in place via its Transformation matrix.
+    """Mirror a Draw shape in place via its Transformation matrix.
 
     GraphicObjectShape has no plain mirror property; flipping is a negative
     scale.  The bounding box is preserved by translating the negated axis.
@@ -321,49 +283,20 @@ def _apply_flip(shape, x, y, w, h, hflip, vflip):
     shape.Transformation = t
 
 
-def add_image(doc, page, smgr, ctx, ib, x_offset=0):
-    """A BookSmart image box -> a GraphicObjectShape, sized + cropped + mirrored."""
-    graphic, mm, px = load_graphic(smgr, ctx, ib.filename)
-
-    # crop as a pixel fraction: setting ib.dpi to the pixel dims makes
-    # calculate_crop() emit crop_* directly as fractions of width/height.
-    ib.dpi = (px.Width or 1, px.Height or 1)
-    ib.calculate_crop()
-
-    sw, sh = pt(ib.width), pt(ib.height)
-    sx, sy = pt(ib.box_x + ib.x + x_offset), pt(ib.box_y + ib.y)
-    shape = doc.createInstance("com.sun.star.drawing.GraphicObjectShape")
-    page.add(shape)
-    shape.Graphic = graphic
-    shape.Size = Size(sw, sh)
-    shape.Position = Point(sx, sy)
-
-    nat_w = mm.Width if mm.Width else int(px.Width / 96.0 * 2540)
-    nat_h = mm.Height if mm.Height else int(px.Height / 96.0 * 2540)
-    crop = uno.createUnoStruct("com.sun.star.text.GraphicCrop")
-    crop.Left = int(ib.crop_left * nat_w)
-    crop.Right = int(ib.crop_right * nat_w)
-    crop.Top = int(ib.crop_top * nat_h)
-    crop.Bottom = int(ib.crop_bottom * nat_h)
-    _set(shape, GraphicCrop=crop)
-    _apply_flip(shape, sx, sy, sw, sh, ib.hflip, ib.vflip)
-    return shape
-
-
 # --------------------------------------------------------------------------
 # decorative text-box borders (ornament SVGs from the theme library)
 # --------------------------------------------------------------------------
 #
 # A BookSmart text-box border places an ornament image above the text (top
-# edge) and below it (bottom edge).  Mirrors odfborder's ODG path: each
-# ornament is an absolutely-positioned shape centred on the text box at the
-# top/bottom edge, and the text is inset by the ornament height.  The .bev
-# assets are DES-encrypted SVGs under <booksmart_dir>/resources/themes/library.
+# edge) and below it (bottom edge).  Each ornament is an absolutely-positioned
+# shape/frame centred on the text box at the top/bottom edge; the text is inset
+# by the ornament height.  The .bev assets are DES-encrypted SVGs under
+# <booksmart_dir>/resources/themes/library.
 #
-# NOTE (Phase 3): bev.decrypt_bev pulls in pycryptodome (DES) and lxml, which a
-# stock LibreOffice bundled Python lacks -- the .oxt will need a pure-Python DES
-# and the et-based helpers below instead.  Imported lazily so the backend loads
-# (and the non-border paths run) without those packages.
+# NOTE (Phase 3): bev.decrypt_bev pulls in pycryptodome (DES), which a stock
+# LibreOffice bundled Python lacks -- the .oxt would need a pure-Python DES.
+# Imported lazily so the backend loads (and the non-border paths run) without
+# it.
 
 def _strip_unit(value):
     """SVG length like '45.848px' or '28' -> float (BookSmart treats units as pt)."""
@@ -450,114 +383,13 @@ def border_pads(tb, booksmart_dir):
     return top_spec, bot_spec, pad_top, pad_bottom
 
 
-def add_border_ornaments(doc, page, smgr, ctx, tb, top_spec, bot_spec,
-                         booksmart_dir, x_offset=0):
-    """Place the top/bottom border ornament shapes for a text box.
-
-    No-op without a BookSmart3 path -- the ornament .bev assets live there, and
-    bev (DES/pycryptodome) is only imported once we have one.
-    """
-    if not booksmart_dir:
-        return
-    import bev
-    gp = smgr.createInstanceWithContext(
-        "com.sun.star.graphic.GraphicProvider", ctx)
-    for spec, is_top in ((top_spec, True), (bot_spec, False)):
-        if not spec:
-            continue
-        stem, mirrored = spec
-        path = _bev_path(stem, booksmart_dir)
-        if not os.path.exists(path):
-            print('warning: border image %s not found, skipping' % path)
-            continue
-        svg = bev.decrypt_bev(path)
-        w, h = _svg_dims(svg)
-
-        stream = smgr.createInstanceWithContext(
-            "com.sun.star.io.SequenceInputStream", ctx)
-        stream.initialize((uno.ByteSequence(svg),))
-        graphic = gp.queryGraphic((_pv("InputStream", stream),))
-
-        shape = doc.createInstance("com.sun.star.drawing.GraphicObjectShape")
-        page.add(shape)
-        shape.Graphic = graphic
-        sw, sh = pt(w), pt(h)
-        sx = pt(tb.x + tb.width / 2.0 - w / 2.0 + x_offset)
-        sy = pt(tb.y) if is_top else pt(tb.y + tb.height - h)
-        shape.Size = Size(sw, sh)
-        shape.Position = Point(sx, sy)
-        if mirrored:
-            # reflect onto the opposite edge (top<->bottom)
-            _apply_flip(shape, sx, sy, sw, sh, False, True)
-
-
-def add_text_box_bordered(doc, page, smgr, ctx, tb, para_styles, span_styles,
-                          page_no, booksmart_dir=None, x_offset=0,
-                          valign_override=None):
-    """Add a text box plus any decorative border ornaments around it."""
-    top_spec, bot_spec, pad_top, pad_bottom = border_pads(tb, booksmart_dir)
-    add_text_box(doc, page, tb, para_styles, span_styles, page_no,
-                 x_offset=x_offset, valign_override=valign_override,
-                 pad_top=pad_top, pad_bottom=pad_bottom)
-    if top_spec or bot_spec:
-        add_border_ornaments(doc, page, smgr, ctx, tb, top_spec, bot_spec,
-                             booksmart_dir, x_offset)
-
-
-# --------------------------------------------------------------------------
-# page driver
-# --------------------------------------------------------------------------
-
-def inject_draw(doc, bs, smgr, ctx, page_limit=None, booksmart_dir=None):
-    """Build the whole book body into ``doc`` (a DrawingDocument model).
-
-    ``page_limit`` (optional) builds only the first N pages, for quick tests.
-    ``booksmart_dir`` enables decorative text-box borders (ornament .bev assets).
-    """
-    para_styles = {p['name']: p for p in bs.get_paragraph_styles()}
-    span_styles = {s['name']: s for s in bs.get_span_styles()}
-    page_styles = {p['name']: p for p in bs.get_page_styles()}
-
-    pages = doc.DrawPages
-    n = len(bs.pages) if page_limit is None else min(page_limit, len(bs.pages))
-
-    for page_no in range(n):
-        page_id = bs.pages[page_no]
-        while pages.Count <= page_no:
-            pages.insertNewByIndex(pages.Count)
-        page = pages.getByIndex(page_no)
-        page.Width = pt(bs.width)
-        page.Height = pt(bs.height)
-        _set(page, BorderLeft=0, BorderRight=0, BorderTop=0, BorderBottom=0)
-
-        # page background via the drawing-page fill (matches the CLI)
-        pstyle = page_styles.get(bs.page_info[page_id]['page_style'])
-        if pstyle is not None and pstyle['bgcolor'] != '#ffffff':
-            set_page_background(doc, page, pstyle['bgcolor'])
-
-        # text boxes (with borders), then images on top (matches the .odg z-order)
-        for tb in bs.text_boxes[page_id]:
-            add_text_box_bordered(doc, page, smgr, ctx, tb, para_styles,
-                                  span_styles, page_no,
-                                  booksmart_dir=booksmart_dir)
-        for ib in bs.images[page_id]:
-            add_image(doc, page, smgr, ctx, ib)
-
-    return doc
-
-
 # print-wrap order of cover parts, left to right (mirrors booksmart2odf)
 COVER_PRINT_ORDER = ['Back Flap', 'Back Cover', 'Spine', 'Front Cover',
                      'Front Flap']
 
 
 def cover_spread(bs, no_flaps=False):
-    """Return (ordered_parts, total_width, height) for the print-wrap spread.
-
-    ``no_flaps`` drops the inner flap parts (wrapped hardcover / softcover).
-    Mirrors booksmart2odf.cover_spread (reimplemented here so the backend stays
-    free of the ezodf/lxml import).
-    """
+    """Return (ordered_parts, total_width, height) for the print-wrap spread."""
     parts = bs.cover
     if no_flaps:
         parts = [p for p in parts if 'Flap' not in p.title]
@@ -573,58 +405,414 @@ def cover_spread(bs, no_flaps=False):
     return parts, total_width, height
 
 
-def inject_cover(doc, bs, smgr, ctx, no_flaps=False, booksmart_dir=None):
-    """Build the cover spread into ``doc`` as a single Draw page.
+# ==========================================================================
+# backends
+# ==========================================================================
 
-    Mirrors the ODG path of booksmart2odf.process_cover: one page sized to the
-    whole print-wrap spread, parts laid left to right, each part stacking its
-    background, then images, then text (so cover text sits above photos).
-    ``booksmart_dir`` enables decorative text-box borders.
+class Backend:
+    """Base: holds the doc/connection and the shared graphic helpers; subclasses
+    implement the document-model-specific operations.
+
+    Subclass contract (all positions/sizes in points; page_no is 0-based):
+      factory / filter_name / default_ext  -- class attributes
+      setup_body(bs)                        -- global page setup for the body
+      setup_cover(width, height)            -- single-page setup for the cover
+      begin_page(page_no, page_id, bs)      -- make/select page page_no
+      page_background(page_no, color)       -- solid page background
+      bg_rect(x, y, w, h, color)            -- a solid rectangle (cover parts)
+      text_box(tb, page_no, ...)            -- a styled text box
+      image(ib, page_no, x_offset=0)        -- a sized/cropped/mirrored image
+      ornament(graphic, w, h, x, y, mirror, page_no)  -- a border ornament
     """
+
+    factory = None
+    filter_name = None
+    default_ext = None
+
+    def __init__(self, doc, smgr, ctx, booksmart_dir=None):
+        self.doc = doc
+        self.smgr = smgr
+        self.ctx = ctx
+        self.booksmart_dir = booksmart_dir
+        self.para_styles = {}
+        self.span_styles = {}
+        self.page_styles = {}
+
+    def init_styles(self, bs):
+        self.para_styles = {p['name']: p for p in bs.get_paragraph_styles()}
+        self.span_styles = {s['name']: s for s in bs.get_span_styles()}
+        self.page_styles = {p['name']: p for p in bs.get_page_styles()}
+
+    def page_bgcolor(self, page_id):
+        ps = self.page_styles.get(
+            self._bs.page_info[page_id]['page_style']) if self._bs else None
+        return ps['bgcolor'] if ps else '#ffffff'
+
+    def svg_graphic(self, svg_bytes):
+        gp = self.smgr.createInstanceWithContext(
+            "com.sun.star.graphic.GraphicProvider", self.ctx)
+        stream = self.smgr.createInstanceWithContext(
+            "com.sun.star.io.SequenceInputStream", self.ctx)
+        stream.initialize((uno.ByteSequence(svg_bytes),))
+        return gp.queryGraphic((_pv("InputStream", stream),))
+
+    # overridable no-ops / abstract
+    def setup_body(self, bs):
+        pass
+
+    def page_background(self, page_no, color):
+        pass
+
+
+class DrawBackend(Backend):
+    """Build a Drawing (ODG) model: one DrawPage per book page, shapes placed by
+    absolute Position/Size."""
+
+    factory = "private:factory/sdraw"
+    filter_name = "draw8"
+    default_ext = "odg"
+
+    def begin_page(self, page_no, page_id, bs):
+        pages = self.doc.DrawPages
+        while pages.Count <= page_no:
+            pages.insertNewByIndex(pages.Count)
+        page = pages.getByIndex(page_no)
+        page.Width = pt(bs.width)
+        page.Height = pt(bs.height)
+        _set(page, BorderLeft=0, BorderRight=0, BorderTop=0, BorderBottom=0)
+        self._page = page
+
+    def setup_cover(self, width, height):
+        page = self.doc.DrawPages.getByIndex(0)
+        page.Width = pt(width)
+        page.Height = pt(height)
+        _set(page, BorderLeft=0, BorderRight=0, BorderTop=0, BorderBottom=0)
+        self._page = page
+
+    def page_background(self, page_no, color):
+        # drawing-page solid fill (ODG has no Writer-style page styles);
+        # com.sun.star.drawing.Background is the instantiable fill bag.
+        bg = self.doc.createInstance("com.sun.star.drawing.Background")
+        bg.setPropertyValue(
+            "FillStyle", uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"))
+        bg.setPropertyValue("FillColor", color_to_int(color))
+        self._page.Background = bg
+
+    def bg_rect(self, x, y, width, height, color):
+        rect = self.doc.createInstance("com.sun.star.drawing.RectangleShape")
+        rect.Size = Size(pt(width), pt(height))
+        rect.Position = Point(pt(x), pt(y))
+        self._page.add(rect)
+        _set(rect,
+             FillStyle=uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"),
+             FillColor=color_to_int(color),
+             LineStyle=uno.Enum("com.sun.star.drawing.LineStyle", "NONE"))
+        return rect
+
+    def text_box(self, tb, page_no, x_offset=0, valign_override=None,
+                 pad_top=0, pad_bottom=0):
+        shape = self.doc.createInstance("com.sun.star.drawing.TextShape")
+        if tb.rotation in (90, 270):
+            # A rotated TextShape lays its text out in the UNROTATED size, then
+            # rotates -- so for quarter turns swap the layout box (text flows
+            # along the long axis) and place it centred on the box centre.
+            w100, h100 = pt(tb.height), pt(tb.width)
+            cx = pt(tb.x + x_offset + tb.width / 2.0)
+            cy = pt(tb.y + tb.height / 2.0)
+            shape.Size = Size(w100, h100)
+            shape.Position = Point(cx - w100 // 2, cy - h100 // 2)
+        else:
+            # inset top/bottom for border ornaments by shrinking the box itself
+            shape.Size = Size(pt(tb.width), pt(tb.height - pad_top - pad_bottom))
+            shape.Position = Point(pt(tb.x + x_offset), pt(tb.y + pad_top))
+        self._page.add(shape)
+
+        _set(shape, TextAutoGrowHeight=False, TextAutoGrowWidth=False,
+             TextLeftDistance=0, TextRightDistance=0,
+             TextUpperDistance=0, TextLowerDistance=0)
+        valign = valign_override if valign_override is not None \
+            else TEXT_VADJUST.get(tb.valign)
+        if valign is not None:
+            _set(shape, TextVerticalAdjust=valign)
+        if tb.rotation:
+            # UNO RotateAngle is 1/100 deg counter-clockwise; BookSmart clockwise
+            _set(shape, RotateAngle=int((360 - tb.rotation) % 360) * 100)
+
+        fill_text(shape.Text, tb, self.para_styles, self.span_styles, page_no)
+        return shape
+
+    def image(self, ib, page_no, x_offset=0):
+        graphic, mm, px = load_graphic(self.smgr, self.ctx, ib.filename)
+        crop = graphic_crop(ib, mm, px)            # mutates ib.x/ib.y (clamps)
+        sw, sh = pt(ib.width), pt(ib.height)
+        sx, sy = pt(ib.box_x + ib.x + x_offset), pt(ib.box_y + ib.y)
+        shape = self.doc.createInstance(
+            "com.sun.star.drawing.GraphicObjectShape")
+        self._page.add(shape)
+        shape.Graphic = graphic
+        shape.Size = Size(sw, sh)
+        shape.Position = Point(sx, sy)
+        _set(shape, GraphicCrop=crop)
+        _apply_flip(shape, sx, sy, sw, sh, ib.hflip, ib.vflip)
+        return shape
+
+    def ornament(self, graphic, w, h, x, y, mirrored, page_no):
+        shape = self.doc.createInstance(
+            "com.sun.star.drawing.GraphicObjectShape")
+        self._page.add(shape)
+        shape.Graphic = graphic
+        sw, sh = pt(w), pt(h)
+        sx, sy = pt(x), pt(y)
+        shape.Size = Size(sw, sh)
+        shape.Position = Point(sx, sy)
+        if mirrored:
+            _apply_flip(shape, sx, sy, sw, sh, False, True)
+        return shape
+
+
+class WriterBackend(Backend):
+    """Build a Text (ODT) model: boxes/images are frames anchored AT_PAGE at
+    absolute positions; pages come from page-break paragraphs that switch to a
+    per-background-colour page style."""
+
+    factory = "private:factory/swriter"
+    filter_name = "writer8"
+    default_ext = "odt"
+
+    _AT_PAGE = uno.Enum("com.sun.star.text.TextContentAnchorType", "AT_PAGE")
+    _THROUGH = uno.Enum("com.sun.star.text.WrapTextMode", "THROUGH")
+    _HORI_NONE = uno.getConstantByName("com.sun.star.text.HoriOrientation.NONE")
+    _VERT_NONE = uno.getConstantByName("com.sun.star.text.VertOrientation.NONE")
+    _PAGE_FRAME = uno.getConstantByName(
+        "com.sun.star.text.RelOrientation.PAGE_FRAME")
+
+    def _page_style_for(self, color, width, height):
+        """Return the name of a page style with this background, creating it
+        (sized width x height, zero margins, no header/footer) on first use.
+        White reuses Standard."""
+        fams = self.doc.StyleFamilies.getByName("PageStyles")
+        if color == '#ffffff':
+            name = "Standard"
+        else:
+            name = "bsbg_%s" % color.lstrip('#')
+        if name not in self._styles_made:
+            ps = fams.getByName(name) if fams.hasByName(name) else \
+                self.doc.createInstance("com.sun.star.style.PageStyle")
+            if not fams.hasByName(name):
+                fams.insertByName(name, ps)
+            _set(ps, Width=pt(width), Height=pt(height),
+                 LeftMargin=0, RightMargin=0, TopMargin=0, BottomMargin=0,
+                 HeaderIsOn=False, FooterIsOn=False)
+            if color != '#ffffff':
+                _set(ps, BackColor=color_to_int(color), BackTransparent=False)
+            self._styles_made.add(name)
+        return name
+
+    def setup_body(self, bs):
+        self._bs = bs
+        self._w, self._h = bs.width, bs.height
+        self._styles_made = set()
+        self._text = self.doc.Text
+        self._cursor = self._text.createTextCursor()
+        self._cursor.gotoStart(False)
+
+    def setup_cover(self, width, height):
+        self._bs = None
+        self._w, self._h = width, height
+        self._styles_made = set()
+        self._text = self.doc.Text
+        self._cursor = self._text.createTextCursor()
+        self._cursor.gotoStart(False)
+        # single page sized to the spread
+        self._page_no = 1
+        name = self._page_style_for('#ffffff', width, height)
+        _set(self._cursor, PageDescName=name)
+
+    def begin_page(self, page_no, page_id, bs):
+        color = self.page_bgcolor(page_id)
+        name = self._page_style_for(color, bs.width, bs.height)
+        if page_no == 0:
+            _set(self._cursor, PageDescName=name)   # set page 1's style
+        else:
+            self._text.insertControlCharacter(self._cursor, _PARA_BREAK, False)
+            _set(self._cursor, PageDescName=name)   # forces a new page + style
+        self._page_no = page_no + 1
+
+    def _anchor(self, content, x, y, w, h, page_no):
+        """Insert a frame/graphic and pin it absolutely to its page.
+
+        AnchorType must be set AFTER insertion -- setting it before insert
+        silently degrades to AT_CHARACTER.
+        """
+        self._text.insertTextContent(self._cursor, content, False)
+        content.AnchorType = self._AT_PAGE
+        _set(content,
+             AnchorPageNo=page_no + 1,
+             HoriOrient=self._HORI_NONE, VertOrient=self._VERT_NONE,
+             HoriOrientRelation=self._PAGE_FRAME,
+             VertOrientRelation=self._PAGE_FRAME,
+             HoriOrientPosition=pt(x), VertOrientPosition=pt(y),
+             Width=pt(w), Height=pt(h),
+             Surround=self._THROUGH)
+        # Writer frames default to a visible border; Draw shapes don't -- strip it
+        nb = uno.createUnoStruct("com.sun.star.table.BorderLine2")
+        nb.LineWidth = 0
+        nb.LineStyle = 0
+        _set(content, LeftBorder=nb, RightBorder=nb, TopBorder=nb,
+             BottomBorder=nb)
+
+    def bg_rect(self, x, y, width, height, color):
+        frame = self.doc.createInstance("com.sun.star.text.TextFrame")
+        self._anchor(frame, x, y, width, height, self._page_no - 1)
+        _set(frame,
+             FillStyle=uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"),
+             FillColor=color_to_int(color), FillTransparence=0,
+             FrameIsAutomaticHeight=False,
+             SizeType=uno.getConstantByName("com.sun.star.text.SizeType.FIX"),
+             BorderDistance=0, LeftBorderDistance=0, RightBorderDistance=0,
+             TopBorderDistance=0, BottomBorderDistance=0)
+        return frame
+
+    def text_box(self, tb, page_no, x_offset=0, valign_override=None,
+                 pad_top=0, pad_bottom=0):
+        frame = self.doc.createInstance("com.sun.star.text.TextFrame")
+        self._anchor(frame, tb.x + x_offset, tb.y + pad_top, tb.width,
+                     tb.height - pad_top - pad_bottom, page_no)
+        # See-through over images: a fully transparent fill (FillTransparence
+        # =100, the CLI's draw:opacity="0%").  FillStyle=NONE alone still paints
+        # the frame white in Writer.  Borderless, no padding, fixed height.
+        _set(frame,
+             FillStyle=uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"),
+             FillColor=0xFFFFFF, FillTransparence=100, BorderDistance=0,
+             LeftBorderDistance=0, RightBorderDistance=0,
+             TopBorderDistance=0, BottomBorderDistance=0,
+             FrameIsAutomaticHeight=False,
+             SizeType=uno.getConstantByName("com.sun.star.text.SizeType.FIX"))
+        # TODO: rotated (spine) text and vertical alignment in Writer frames
+        fill_text(frame.Text, tb, self.para_styles, self.span_styles, page_no,
+                  page_number_field=self._page_number_field)
+        return frame
+
+    def _page_number_field(self, xtext, cursor):
+        """Insert a live current-page-number field (arabic)."""
+        field = self.doc.createInstance("com.sun.star.text.TextField.PageNumber")
+        _set(field,
+             SubType=uno.Enum("com.sun.star.text.PageNumberType", "CURRENT"),
+             NumberingType=4)  # com.sun.star.style.NumberingType.ARABIC
+        xtext.insertTextContent(cursor, field, False)
+
+    def image(self, ib, page_no, x_offset=0):
+        graphic, mm, px = load_graphic(self.smgr, self.ctx, ib.filename)
+        crop = graphic_crop(ib, mm, px)            # mutates ib.x/ib.y (clamps)
+        img = self.doc.createInstance("com.sun.star.text.TextGraphicObject")
+        img.Graphic = graphic
+        self._anchor(img, ib.box_x + ib.x + x_offset, ib.box_y + ib.y,
+                     ib.width, ib.height, page_no)
+        _set(img, GraphicCrop=crop)
+        if ib.hflip:
+            _set(img, HoriMirroredOnEvenPages=True, HoriMirroredOnOddPages=True)
+        if ib.vflip:
+            _set(img, VertMirrored=True)
+        return img
+
+    def ornament(self, graphic, w, h, x, y, mirrored, page_no):
+        img = self.doc.createInstance("com.sun.star.text.TextGraphicObject")
+        img.Graphic = graphic
+        self._anchor(img, x, y, w, h, page_no)
+        if mirrored:
+            _set(img, VertMirrored=True)
+        return img
+
+
+# ==========================================================================
+# format-neutral drivers
+# ==========================================================================
+
+def _place_text_box(backend, tb, page_no, x_offset=0, valign_override=None):
+    """Place a text box plus any decorative border ornaments around it."""
+    top_spec, bot_spec, pad_top, pad_bottom = border_pads(
+        tb, backend.booksmart_dir)
+    backend.text_box(tb, page_no, x_offset=x_offset,
+                     valign_override=valign_override,
+                     pad_top=pad_top, pad_bottom=pad_bottom)
+    if not (top_spec or bot_spec) or not backend.booksmart_dir:
+        return
+    import bev
+    for spec, is_top in ((top_spec, True), (bot_spec, False)):
+        if not spec:
+            continue
+        stem, mirrored = spec
+        path = _bev_path(stem, backend.booksmart_dir)
+        if not os.path.exists(path):
+            print('warning: border image %s not found, skipping' % path)
+            continue
+        svg = bev.decrypt_bev(path)
+        w, h = _svg_dims(svg)
+        graphic = backend.svg_graphic(svg)
+        x = tb.x + tb.width / 2.0 - w / 2.0 + x_offset
+        y = tb.y if is_top else tb.y + tb.height - h
+        backend.ornament(graphic, w, h, x, y, mirrored, page_no)
+
+
+def inject(backend, bs, page_limit=None):
+    """Build the whole book body into the backend's document."""
+    backend.init_styles(bs)
+    backend._bs = bs
+    backend.setup_body(bs)
+    n = len(bs.pages) if page_limit is None else min(page_limit, len(bs.pages))
+
+    for page_no in range(n):
+        page_id = bs.pages[page_no]
+        backend.begin_page(page_no, page_id, bs)
+
+        color = backend.page_bgcolor(page_id)
+        if color != '#ffffff':
+            backend.page_background(page_no, color)
+
+        # text boxes (with borders), then images on top
+        for tb in bs.text_boxes[page_id]:
+            _place_text_box(backend, tb, page_no)
+        for ib in bs.images[page_id]:
+            backend.image(ib, page_no)
+
+    return backend.doc
+
+
+def inject_cover(backend, bs, no_flaps=False):
+    """Build the cover spread into the backend's document (a single page)."""
     if not bs.cover:
         raise ValueError("This book has no cover to convert.")
-
-    para_styles = {p['name']: p for p in bs.get_paragraph_styles()}
-    span_styles = {s['name']: s for s in bs.get_span_styles()}
-
+    backend.init_styles(bs)
     parts, total_width, height = cover_spread(bs, no_flaps)
-
-    page = doc.DrawPages.getByIndex(0)
-    page.Width = pt(total_width)
-    page.Height = pt(height)
-    _set(page, BorderLeft=0, BorderRight=0, BorderTop=0, BorderBottom=0)
+    backend.setup_cover(total_width, height)
 
     x_off = 0
     for part in parts:
-        # per-part background (a cover page mixes several part colours, so this
-        # is a rectangle, not the single per-page Background fill)
-        add_bg_rect(doc, page, part.width, part.height, part.bgcolor, x=x_off)
-
+        # per-part background, then images, then text (cover text above photos)
+        backend.bg_rect(x_off, 0, part.width, part.height, part.bgcolor)
         for ib in part.images:
-            add_image(doc, page, smgr, ctx, ib, x_offset=x_off)
-
+            backend.image(ib, 0, x_offset=x_off)
         for tb in part.text_boxes:
             valign_override = None
             if tb.rotation in (90, 270):
-                # rotated (spine) text: span the full part width, centre it
                 tb.x = 0
                 tb.width = part.width
                 valign_override = VC
-            add_text_box_bordered(doc, page, smgr, ctx, tb, para_styles,
-                                  span_styles, 0, booksmart_dir=booksmart_dir,
-                                  x_offset=x_off,
-                                  valign_override=valign_override)
-
+            _place_text_box(backend, tb, 0, x_offset=x_off,
+                            valign_override=valign_override)
         x_off += part.width
 
-    return doc
+    return backend.doc
+
+
+BACKENDS = {"odg": DrawBackend, "odt": WriterBackend}
 
 
 # --------------------------------------------------------------------------
 # standalone runner (headless soffice socket) -- not used by the filter
 # --------------------------------------------------------------------------
 
-def _connect(port, timeout=30.0):
+def connect(port, timeout=30.0):
     import time
     from com.sun.star.connection import NoConnectException
     local = uno.getComponentContext()
@@ -648,11 +836,13 @@ def _connect(port, timeout=30.0):
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="Inject a .book into a live Draw "
-                                 "document via UNO (standalone test driver).")
+    ap = argparse.ArgumentParser(description="Inject a .book into a live "
+                                 "LibreOffice document via UNO (standalone).")
     ap.add_argument("book_file")
+    ap.add_argument("-f", "--format", choices=["odg", "odt"], default="odg",
+                    help="target model: odg (Draw, default) or odt (Writer)")
     ap.add_argument("-p", "--port", type=int, default=2002)
-    ap.add_argument("-o", "--output", help="output .odg (default: <book>.odg)")
+    ap.add_argument("-o", "--output", help="output file (default: <book>.<ext>)")
     ap.add_argument("--pages", type=int, help="only build the first N pages")
     ap.add_argument("--cover", action="store_true",
                     help="build the cover spread instead of the book body")
@@ -663,7 +853,7 @@ def main():
                          "text-box borders (ornament .bev assets)")
     args = ap.parse_args()
 
-    ctx, smgr, desktop = _connect(args.port)
+    ctx, smgr, desktop = connect(args.port)
 
     # install the Pillow-free prober before parsing
     bookxml.probe_image = make_uno_prober(smgr, ctx)
@@ -671,23 +861,21 @@ def main():
     print("Parsed: %s  (%dx%d pt, %d pages)" % (
         bs.info.get('booktitle', ''), bs.width, bs.height, len(bs.pages)))
 
-    doc = desktop.loadComponentFromURL(
-        "private:factory/sdraw", "_blank", 0, ())
+    backend_cls = BACKENDS[args.format]
+    doc = desktop.loadComponentFromURL(backend_cls.factory, "_blank", 0, ())
+    backend = backend_cls(doc, smgr, ctx, booksmart_dir=args.booksmart_dir)
     if args.cover:
-        inject_cover(doc, bs, smgr, ctx, no_flaps=args.no_flaps,
-                     booksmart_dir=args.booksmart_dir)
+        inject_cover(backend, bs, no_flaps=args.no_flaps)
     else:
-        inject_draw(doc, bs, smgr, ctx, page_limit=args.pages,
-                    booksmart_dir=args.booksmart_dir)
+        inject(backend, bs, page_limit=args.pages)
 
     if args.output:
         out = args.output
-    elif args.cover:
-        out = os.path.splitext(args.book_file)[0] + " cover.odg"
     else:
-        out = os.path.splitext(args.book_file)[0] + ".odg"
+        suffix = (" cover." if args.cover else ".") + backend_cls.default_ext
+        out = os.path.splitext(args.book_file)[0] + suffix
     doc.storeToURL(uno.systemPathToFileUrl(os.path.abspath(out)),
-                   (_pv("FilterName", "draw8"),))
+                   (_pv("FilterName", backend_cls.filter_name),))
     doc.close(False)
     print("Wrote %s" % out)
 
