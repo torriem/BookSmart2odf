@@ -4,9 +4,16 @@ Converts Blurb **BookSmart** photo books (`.book` files) into OpenDocument
 documents that you can open and edit in LibreOffice — either **ODT**
 (LibreOffice Writer) or **ODG** (LibreOffice Draw).
 
-Blurb's BookSmart application is long discontinued. This script lets you recover
+Blurb's BookSmart application is long discontinued. This project lets you recover
 the contents of your old books, including full text, styles, images, decorative text-box
 borders, and the cover, into an open, editable format.
+
+It works two ways:
+
+- a **command-line converter** (`booksmart2odf.py`) that writes an `.odt`/`.odg`
+  file, and
+- a **LibreOffice import-filter extension** that opens `.book` files directly
+  from LibreOffice with File ▸ Open (see [below](#libreoffice-import-filter-open-book-files-directly)).
 
 Note I have only tested this with my own photo books.  You may have to do manual editing to ensure everything is correct.
 
@@ -84,6 +91,47 @@ edge of its text box rather than flowing with the text.
 Pick ODT if you want to keep editing the text, ODG if you want a faithful
 fixed layout.
 
+## LibreOffice import filter (open `.book` files directly)
+
+As an alternative to the command-line converter, this project includes a
+LibreOffice **import-filter extension** that lets you open a `.book` file
+straight from LibreOffice with **File ▸ Open** — no separate conversion step.
+
+Build the extension and install it (with LibreOffice closed):
+
+```
+./oxt/build.sh                        # produces oxt/booksmart-import.oxt
+unopkg add oxt/booksmart-import.oxt
+```
+
+Then open a `.book` file in LibreOffice.
+
+- By default the book opens in **Draw (ODG)**. To open it in **Writer (ODT)**
+  instead, either open it from within a Writer window, or pick *BookSmart Book
+  (Writer)* in the File ▸ Open file-type dropdown. (Opening from a Draw window
+  likewise uses the Draw filter.)
+- Only the **body pages** are imported.  The cover spread is not but you can use the
+  command-line tool with `--cover` for that.
+- Decorative **borders are not rendered** by the extension as it has no reliable
+  way to find your BookSmart3 install (if you even have one) for the encrypted `.bev` ornament assets.
+  Use the command-line `-b` option if you need borders.
+- There is no `.book` *export* filter, so **File ▸ Save** offers *Save As* to a
+  native format.  You can't accidentally overwrite the original `.book`.
+
+Unlike the command-line converter, the extension runs inside LibreOffice's own
+bundled Python and needs **none** of the Python modules listed under
+[Requirements](#requirements): images are handled through LibreOffice's UNO
+graphics API.
+
+To update an already-installed copy, **remove then add** it (with LibreOffice
+fully closed) rather than `unopkg add -f`, so LibreOffice rebuilds its filter
+cache:
+
+```
+unopkg remove org.booksmart2odf.import
+unopkg add oxt/booksmart-import.oxt
+```
+
 ## Caveats
 
 This script aims for a faithful reproduction, but it is not perfect:
@@ -98,13 +146,17 @@ printable document.
 
 ## Requirements
 
+These apply to the **command-line converter**. The LibreOffice import-filter
+extension needs none of them because it uses LibreOffice's bundled Python and 
+UNO API to do the work.
+
 Python modules:
 
 - `ezodf`
 - `lxml`
-- `PIL` (Pillow) — also used to normalize image DPI so LibreOffice sizes and
+- `PIL` (Pillow) — used to normalize image DPI so LibreOffice sizes and
   crops images correctly
 - `pycryptodome` / `Crypto` — only needed for decrypting border ornaments
   (the `-b` option)
 
-(There may be other incidental dependencies.)
+There may be other incidental dependencies.
