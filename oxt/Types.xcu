@@ -6,13 +6,13 @@
   <node oor:name="Types">
     <node oor:name="booksmart_Book" oor:op="replace">
       <prop oor:name="DetectService">
-        <value>org.booksmart2odf.WriterImportFilter</value>
+        <value>org.booksmart2odf.ImportFilter</value>
       </prop>
       <prop oor:name="URLPattern"><value/></prop>
       <prop oor:name="Extensions"><value>book</value></prop>
       <prop oor:name="MediaType"><value/></prop>
       <prop oor:name="Preferred"><value>true</value></prop>
-      <prop oor:name="PreferredFilter"><value>booksmart_writer_import</value></prop>
+      <prop oor:name="PreferredFilter"><value>booksmart_draw_import</value></prop>
       <prop oor:name="UIName">
         <value xml:lang="en-US">BookSmart Book</value>
       </prop>

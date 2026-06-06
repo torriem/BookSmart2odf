@@ -4,11 +4,28 @@
                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                     oor:name="Filter" oor:package="org.openoffice.TypeDetection">
   <node oor:name="Filters">
+    <node oor:name="booksmart_draw_import" oor:op="replace">
+      <prop oor:name="Flags"><value>IMPORT ALIEN 3RDPARTYFILTER PREFERRED</value></prop>
+      <prop oor:name="UIComponent"><value/></prop>
+      <prop oor:name="FilterService">
+        <value>org.booksmart2odf.ImportFilter</value>
+      </prop>
+      <prop oor:name="UserData"><value/></prop>
+      <prop oor:name="FileFormatVersion"><value>0</value></prop>
+      <prop oor:name="Type"><value>booksmart_Book</value></prop>
+      <prop oor:name="TemplateName"><value/></prop>
+      <prop oor:name="DocumentService">
+        <value>com.sun.star.drawing.DrawingDocument</value>
+      </prop>
+      <prop oor:name="UIName">
+        <value xml:lang="en-US">BookSmart Book (Draw)</value>
+      </prop>
+    </node>
     <node oor:name="booksmart_writer_import" oor:op="replace">
       <prop oor:name="Flags"><value>IMPORT ALIEN 3RDPARTYFILTER</value></prop>
       <prop oor:name="UIComponent"><value/></prop>
       <prop oor:name="FilterService">
-        <value>org.booksmart2odf.WriterImportFilter</value>
+        <value>org.booksmart2odf.ImportFilter</value>
       </prop>
       <prop oor:name="UserData"><value/></prop>
       <prop oor:name="FileFormatVersion"><value>0</value></prop>

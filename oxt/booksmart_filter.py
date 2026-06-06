@@ -1,11 +1,16 @@
-"""LibreOffice import filter for BookSmart .book files -> Writer (ODT).
+"""LibreOffice import filter for BookSmart .book files -> Draw (ODG) or Writer (ODT).
 
 A passive Python UNO component.  LibreOffice detects a .book file (see
-Types.xcu / Filters.xcu), creates an empty Writer document, then calls
-``setTargetDocument()`` and ``filter()``; we parse the .book with the
-BookSmart2odf parser and inject the body pages into that document via the UNO
-Writer backend.  The combined cover spread is deliberately not imported (the
-cover code path stays available for the CLI/standalone runner).
+Types.xcu / Filters.xcu) and creates an empty document of the type the chosen
+filter declares -- a Drawing document for the default "BookSmart Book (Draw)"
+filter, or a Text document for "BookSmart Book (Writer)" (selectable in the
+File > Open file-type dropdown).  It then calls ``setTargetDocument()`` and
+``filter()``; we parse the .book with the BookSmart2odf parser and inject the
+body pages into that document via the matching UNO backend (DrawBackend or
+WriterBackend, picked from the target model's service).
+
+The combined cover spread is deliberately not imported (the cover code path
+stays available for the CLI/standalone runner).
 
 No Pillow / lxml / exiftool are needed: the parser's image probe is swapped for
 a GraphicProvider-based one, and images load through GraphicProvider.  The
@@ -38,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bookxml
 import unobuild
 
-IMPL_NAME = "org.booksmart2odf.WriterImportFilter"
+IMPL_NAME = "org.booksmart2odf.ImportFilter"
 TYPE_NAME = "booksmart_Book"
 
 
@@ -48,8 +53,8 @@ def _looks_like_book(head):
     return b"<Book " in head and b"bookGuid=" in head
 
 
-class WriterImportFilter(unohelper.Base, XFilter, XImporter,
-                         XExtendedFilterDetection, XServiceInfo):
+class BookSmartImportFilter(unohelper.Base, XFilter, XImporter,
+                            XExtendedFilterDetection, XServiceInfo):
     def __init__(self, ctx):
         self.ctx = ctx
         self.smgr = ctx.ServiceManager
@@ -115,7 +120,15 @@ class WriterImportFilter(unohelper.Base, XFilter, XImporter,
             # Pillow-free image probe; images load via GraphicProvider.
             bookxml.probe_image = unobuild.make_uno_prober(self.smgr, self.ctx)
             bs = bookxml.BookXML(path)
-            backend = unobuild.WriterBackend(self.target, self.smgr, self.ctx)
+            # Pick the backend from the model the framework created for us: the
+            # Draw filter yields a DrawingDocument, the Writer filter a
+            # TextDocument.
+            if self.target.supportsService(
+                    "com.sun.star.drawing.DrawingDocument"):
+                backend = unobuild.DrawBackend(self.target, self.smgr, self.ctx)
+            else:
+                backend = unobuild.WriterBackend(self.target, self.smgr,
+                                                 self.ctx)
             # Body pages only -- the cover spread is deliberately not imported
             # (inject_book/inject_cover remain available for the CLI).  Suppress
             # view/layout updates while we bulk-build the model; during a live
@@ -151,6 +164,6 @@ class WriterImportFilter(unohelper.Base, XFilter, XImporter,
 
 g_ImplementationHelper = unohelper.ImplementationHelper()
 g_ImplementationHelper.addImplementation(
-    WriterImportFilter, IMPL_NAME,
+    BookSmartImportFilter, IMPL_NAME,
     ("com.sun.star.document.ImportFilter",
      "com.sun.star.document.ExtendedTypeDetection"))
