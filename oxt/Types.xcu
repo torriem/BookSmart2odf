@@ -5,7 +5,9 @@
                     oor:name="Types" oor:package="org.openoffice.TypeDetection">
   <node oor:name="Types">
     <node oor:name="booksmart_Book" oor:op="replace">
-      <prop oor:name="DetectService"><value/></prop>
+      <prop oor:name="DetectService">
+        <value>org.booksmart2odf.WriterImportFilter</value>
+      </prop>
       <prop oor:name="URLPattern"><value/></prop>
       <prop oor:name="Extensions"><value>book</value></prop>
       <prop oor:name="MediaType"><value/></prop>
