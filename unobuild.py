@@ -413,21 +413,31 @@ class Backend:
     """Base: holds the doc/connection and the shared graphic helpers; subclasses
     implement the document-model-specific operations.
 
-    Subclass contract (all positions/sizes in points; page_no is 0-based):
+    Pages are created sequentially: begin_page() advances an internal physical
+    page counter, so a document can be composed by building the cover page first
+    and the body pages after.  Subclass contract (positions/sizes in points):
       factory / filter_name / default_ext  -- class attributes
-      setup_body(bs)                        -- global page setup for the body
-      setup_cover(width, height)            -- single-page setup for the cover
-      begin_page(page_no, page_id, bs)      -- make/select page page_no
-      page_background(page_no, color)       -- solid page background
+      setup()                               -- one-time per-document setup
+      begin_page(width, height, bgcolor='#ffffff', restart_number=False)
+                                            -- start the next physical page
       bg_rect(x, y, w, h, color)            -- a solid rectangle (cover parts)
-      text_box(tb, page_no, ...)            -- a styled text box
-      image(ib, page_no, x_offset=0)        -- a sized/cropped/mirrored image
-      ornament(graphic, w, h, x, y, mirror, page_no)  -- a border ornament
+      text_box(tb, page_no, ...)            -- a styled text box (page_no is the
+                                               book page number for $PageNumber)
+      image(ib, x_offset=0)                 -- a sized/cropped/mirrored image
+      ornament(graphic, w, h, x, y, mirror) -- a border ornament
+
+    Placement always targets the current page (the last begun); ``restart_number``
+    resets the page-number count to 1 (used on the first body page so book page
+    numbers ignore the cover).
     """
 
     factory = None
     filter_name = None
     default_ext = None
+    # Draw forces one page size for the whole document; Writer varies it per
+    # page via page styles.  Only the latter can hold the spread-sized cover and
+    # the body pages in one document.
+    uniform_page_size = False
 
     def __init__(self, doc, smgr, ctx, booksmart_dir=None):
         self.doc = doc
@@ -437,6 +447,8 @@ class Backend:
         self.para_styles = {}
         self.span_styles = {}
         self.page_styles = {}
+        self._bs = None
+        self._phys = -1
 
     def init_styles(self, bs):
         self.para_styles = {p['name']: p for p in bs.get_paragraph_styles()}
@@ -456,12 +468,14 @@ class Backend:
         stream.initialize((uno.ByteSequence(svg_bytes),))
         return gp.queryGraphic((_pv("InputStream", stream),))
 
-    # overridable no-ops / abstract
-    def setup_body(self, bs):
-        pass
+    def setup(self):
+        """One-time per-document setup; subclasses extend."""
+        self._phys = -1
 
-    def page_background(self, page_no, color):
-        pass
+    def _new_page(self):
+        """Advance to the next physical page (0-based index) and return it."""
+        self._phys += 1
+        return self._phys
 
 
 class DrawBackend(Backend):
@@ -471,32 +485,28 @@ class DrawBackend(Backend):
     factory = "private:factory/sdraw"
     filter_name = "draw8"
     default_ext = "odg"
+    uniform_page_size = True
 
-    def begin_page(self, page_no, page_id, bs):
+    def begin_page(self, width, height, bgcolor='#ffffff', restart_number=False):
+        idx = self._new_page()
         pages = self.doc.DrawPages
-        while pages.Count <= page_no:
+        while pages.Count <= idx:
             pages.insertNewByIndex(pages.Count)
-        page = pages.getByIndex(page_no)
-        page.Width = pt(bs.width)
-        page.Height = pt(bs.height)
-        _set(page, BorderLeft=0, BorderRight=0, BorderTop=0, BorderBottom=0)
-        self._page = page
-
-    def setup_cover(self, width, height):
-        page = self.doc.DrawPages.getByIndex(0)
+        page = pages.getByIndex(idx)
         page.Width = pt(width)
         page.Height = pt(height)
         _set(page, BorderLeft=0, BorderRight=0, BorderTop=0, BorderBottom=0)
         self._page = page
-
-    def page_background(self, page_no, color):
-        # drawing-page solid fill (ODG has no Writer-style page styles);
-        # com.sun.star.drawing.Background is the instantiable fill bag.
-        bg = self.doc.createInstance("com.sun.star.drawing.Background")
-        bg.setPropertyValue(
-            "FillStyle", uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"))
-        bg.setPropertyValue("FillColor", color_to_int(color))
-        self._page.Background = bg
+        if bgcolor and bgcolor != '#ffffff':
+            # drawing-page solid fill (ODG has no Writer-style page styles);
+            # com.sun.star.drawing.Background is the instantiable fill bag.
+            bg = self.doc.createInstance("com.sun.star.drawing.Background")
+            bg.setPropertyValue(
+                "FillStyle", uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"))
+            bg.setPropertyValue("FillColor", color_to_int(bgcolor))
+            page.Background = bg
+        # restart_number: $PageNumber is rendered statically in Draw, so the
+        # restart is just the book number the driver passes to text_box.
 
     def bg_rect(self, x, y, width, height, color):
         rect = self.doc.createInstance("com.sun.star.drawing.RectangleShape")
@@ -541,7 +551,7 @@ class DrawBackend(Backend):
         fill_text(shape.Text, tb, self.para_styles, self.span_styles, page_no)
         return shape
 
-    def image(self, ib, page_no, x_offset=0):
+    def image(self, ib, x_offset=0):
         graphic, mm, px = load_graphic(self.smgr, self.ctx, ib.filename)
         crop = graphic_crop(ib, mm, px)            # mutates ib.x/ib.y (clamps)
         sw, sh = pt(ib.width), pt(ib.height)
@@ -556,7 +566,7 @@ class DrawBackend(Backend):
         _apply_flip(shape, sx, sy, sw, sh, ib.hflip, ib.vflip)
         return shape
 
-    def ornament(self, graphic, w, h, x, y, mirrored, page_no):
+    def ornament(self, graphic, w, h, x, y, mirrored):
         shape = self.doc.createInstance(
             "com.sun.star.drawing.GraphicObjectShape")
         self._page.add(shape)
@@ -587,18 +597,18 @@ class WriterBackend(Backend):
         "com.sun.star.text.RelOrientation.PAGE_FRAME")
 
     def _page_style_for(self, color, width, height):
-        """Return the name of a page style with this background, creating it
-        (sized width x height, zero margins, no header/footer) on first use.
-        White reuses Standard."""
-        fams = self.doc.StyleFamilies.getByName("PageStyles")
-        if color == '#ffffff':
-            name = "Standard"
-        else:
-            name = "bsbg_%s" % color.lstrip('#')
+        """Return the name of a page style with this background AND size,
+        creating it on first use (zero margins, no header/footer).  The name
+        encodes size too so cover (spread-sized) and body pages don't collide on
+        one shared style."""
+        name = "bs_%s_%dx%d" % (color.lstrip('#'),
+                                int(round(width)), int(round(height)))
         if name not in self._styles_made:
-            ps = fams.getByName(name) if fams.hasByName(name) else \
-                self.doc.createInstance("com.sun.star.style.PageStyle")
-            if not fams.hasByName(name):
+            fams = self.doc.StyleFamilies.getByName("PageStyles")
+            if fams.hasByName(name):
+                ps = fams.getByName(name)
+            else:
+                ps = self.doc.createInstance("com.sun.star.style.PageStyle")
                 fams.insertByName(name, ps)
             _set(ps, Width=pt(width), Height=pt(height),
                  LeftMargin=0, RightMargin=0, TopMargin=0, BottomMargin=0,
@@ -608,38 +618,32 @@ class WriterBackend(Backend):
             self._styles_made.add(name)
         return name
 
-    def setup_body(self, bs):
-        self._bs = bs
-        self._w, self._h = bs.width, bs.height
+    def setup(self):
+        super().setup()
         self._styles_made = set()
+        self._pageno_offset = 0   # added to $PageNumber fields (see begin_page)
         self._text = self.doc.Text
         self._cursor = self._text.createTextCursor()
         self._cursor.gotoStart(False)
 
-    def setup_cover(self, width, height):
-        self._bs = None
-        self._w, self._h = width, height
-        self._styles_made = set()
-        self._text = self.doc.Text
-        self._cursor = self._text.createTextCursor()
-        self._cursor.gotoStart(False)
-        # single page sized to the spread
-        self._page_no = 1
-        name = self._page_style_for('#ffffff', width, height)
-        _set(self._cursor, PageDescName=name)
-
-    def begin_page(self, page_no, page_id, bs):
-        color = self.page_bgcolor(page_id)
-        name = self._page_style_for(color, bs.width, bs.height)
-        if page_no == 0:
-            _set(self._cursor, PageDescName=name)   # set page 1's style
+    def begin_page(self, width, height, bgcolor='#ffffff', restart_number=False):
+        idx = self._new_page()
+        name = self._page_style_for(bgcolor, width, height)
+        if idx == 0:
+            _set(self._cursor, PageDescName=name)   # first page's style
         else:
             self._text.insertControlCharacter(self._cursor, _PARA_BREAK, False)
             _set(self._cursor, PageDescName=name)   # forces a new page + style
-        self._page_no = page_no + 1
+        if restart_number:
+            # Restart the book's page-number count at 1 on this page.  Setting
+            # the paragraph PageNumberOffset would do it but spuriously inserts a
+            # phantom page in this LO build, so instead offset the $PageNumber
+            # fields by -(pages before this one): physical page (_phys+1) +
+            # offset == 1 here.
+            self._pageno_offset = -self._phys
 
-    def _anchor(self, content, x, y, w, h, page_no):
-        """Insert a frame/graphic and pin it absolutely to its page.
+    def _anchor(self, content, x, y, w, h):
+        """Insert a frame/graphic and pin it absolutely to the current page.
 
         AnchorType must be set AFTER insertion -- setting it before insert
         silently degrades to AT_CHARACTER.
@@ -647,7 +651,7 @@ class WriterBackend(Backend):
         self._text.insertTextContent(self._cursor, content, False)
         content.AnchorType = self._AT_PAGE
         _set(content,
-             AnchorPageNo=page_no + 1,
+             AnchorPageNo=self._phys + 1,
              HoriOrient=self._HORI_NONE, VertOrient=self._VERT_NONE,
              HoriOrientRelation=self._PAGE_FRAME,
              VertOrientRelation=self._PAGE_FRAME,
@@ -663,7 +667,7 @@ class WriterBackend(Backend):
 
     def bg_rect(self, x, y, width, height, color):
         frame = self.doc.createInstance("com.sun.star.text.TextFrame")
-        self._anchor(frame, x, y, width, height, self._page_no - 1)
+        self._anchor(frame, x, y, width, height)
         _set(frame,
              FillStyle=uno.Enum("com.sun.star.drawing.FillStyle", "SOLID"),
              FillColor=color_to_int(color), FillTransparence=0,
@@ -677,7 +681,7 @@ class WriterBackend(Backend):
                  pad_top=0, pad_bottom=0):
         frame = self.doc.createInstance("com.sun.star.text.TextFrame")
         self._anchor(frame, tb.x + x_offset, tb.y + pad_top, tb.width,
-                     tb.height - pad_top - pad_bottom, page_no)
+                     tb.height - pad_top - pad_bottom)
         # See-through over images: a fully transparent fill (FillTransparence
         # =100, the CLI's draw:opacity="0%").  FillStyle=NONE alone still paints
         # the frame white in Writer.  Borderless, no padding, fixed height.
@@ -694,20 +698,22 @@ class WriterBackend(Backend):
         return frame
 
     def _page_number_field(self, xtext, cursor):
-        """Insert a live current-page-number field (arabic)."""
+        """Insert a live current-page-number field (arabic), offset so book
+        numbering ignores any preceding cover page."""
         field = self.doc.createInstance("com.sun.star.text.TextField.PageNumber")
         _set(field,
              SubType=uno.Enum("com.sun.star.text.PageNumberType", "CURRENT"),
-             NumberingType=4)  # com.sun.star.style.NumberingType.ARABIC
+             NumberingType=4,  # com.sun.star.style.NumberingType.ARABIC
+             Offset=self._pageno_offset)
         xtext.insertTextContent(cursor, field, False)
 
-    def image(self, ib, page_no, x_offset=0):
+    def image(self, ib, x_offset=0):
         graphic, mm, px = load_graphic(self.smgr, self.ctx, ib.filename)
         crop = graphic_crop(ib, mm, px)            # mutates ib.x/ib.y (clamps)
         img = self.doc.createInstance("com.sun.star.text.TextGraphicObject")
         img.Graphic = graphic
         self._anchor(img, ib.box_x + ib.x + x_offset, ib.box_y + ib.y,
-                     ib.width, ib.height, page_no)
+                     ib.width, ib.height)
         _set(img, GraphicCrop=crop)
         if ib.hflip:
             _set(img, HoriMirroredOnEvenPages=True, HoriMirroredOnOddPages=True)
@@ -715,10 +721,10 @@ class WriterBackend(Backend):
             _set(img, VertMirrored=True)
         return img
 
-    def ornament(self, graphic, w, h, x, y, mirrored, page_no):
+    def ornament(self, graphic, w, h, x, y, mirrored):
         img = self.doc.createInstance("com.sun.star.text.TextGraphicObject")
         img.Graphic = graphic
-        self._anchor(img, x, y, w, h, page_no)
+        self._anchor(img, x, y, w, h)
         if mirrored:
             _set(img, VertMirrored=True)
         return img
@@ -751,47 +757,19 @@ def _place_text_box(backend, tb, page_no, x_offset=0, valign_override=None):
         graphic = backend.svg_graphic(svg)
         x = tb.x + tb.width / 2.0 - w / 2.0 + x_offset
         y = tb.y if is_top else tb.y + tb.height - h
-        backend.ornament(graphic, w, h, x, y, mirrored, page_no)
+        backend.ornament(graphic, w, h, x, y, mirrored)
 
 
-def inject(backend, bs, page_limit=None):
-    """Build the whole book body into the backend's document."""
-    backend.init_styles(bs)
-    backend._bs = bs
-    backend.setup_body(bs)
-    n = len(bs.pages) if page_limit is None else min(page_limit, len(bs.pages))
-
-    for page_no in range(n):
-        page_id = bs.pages[page_no]
-        backend.begin_page(page_no, page_id, bs)
-
-        color = backend.page_bgcolor(page_id)
-        if color != '#ffffff':
-            backend.page_background(page_no, color)
-
-        # text boxes (with borders), then images on top
-        for tb in bs.text_boxes[page_id]:
-            _place_text_box(backend, tb, page_no)
-        for ib in bs.images[page_id]:
-            backend.image(ib, page_no)
-
-    return backend.doc
-
-
-def inject_cover(backend, bs, no_flaps=False):
-    """Build the cover spread into the backend's document (a single page)."""
-    if not bs.cover:
-        raise ValueError("This book has no cover to convert.")
-    backend.init_styles(bs)
+def _build_cover(backend, bs, no_flaps):
+    """Build the combined cover spread onto the next page (one page)."""
     parts, total_width, height = cover_spread(bs, no_flaps)
-    backend.setup_cover(total_width, height)
-
+    backend.begin_page(total_width, height)
     x_off = 0
     for part in parts:
         # per-part background, then images, then text (cover text above photos)
         backend.bg_rect(x_off, 0, part.width, part.height, part.bgcolor)
         for ib in part.images:
-            backend.image(ib, 0, x_offset=x_off)
+            backend.image(ib, x_offset=x_off)
         for tb in part.text_boxes:
             valign_override = None
             if tb.rotation in (90, 270):
@@ -802,6 +780,59 @@ def inject_cover(backend, bs, no_flaps=False):
                             valign_override=valign_override)
         x_off += part.width
 
+
+def _build_body(backend, bs, page_limit=None):
+    """Build the book body pages onto subsequent pages."""
+    n = len(bs.pages) if page_limit is None else min(page_limit, len(bs.pages))
+    for i in range(n):
+        page_id = bs.pages[i]
+        backend.begin_page(bs.width, bs.height, backend.page_bgcolor(page_id),
+                           restart_number=(i == 0))
+        # text boxes (with borders), then images on top.  page_no = book page
+        # number (1-based), so $PageNumber ignores any preceding cover page.
+        for tb in bs.text_boxes[page_id]:
+            _place_text_box(backend, tb, i + 1)
+        for ib in bs.images[page_id]:
+            backend.image(ib)
+
+
+def inject_book(backend, bs, no_flaps=True, page_limit=None):
+    """Build the whole book: the combined cover spread as page 1 (jacket-wrap
+    flaps omitted by default), then the body pages.
+
+    The spread-sized cover and the body pages can only share one document on a
+    backend with per-page sizing (Writer).  On a uniform-page-size backend
+    (Draw) the cover is omitted here -- build it separately with inject_cover."""
+    backend.init_styles(bs)
+    backend._bs = bs
+    backend.setup()
+    if bs.cover and not backend.uniform_page_size:
+        _build_cover(backend, bs, no_flaps)
+    elif bs.cover:
+        print("note: %s uses one page size for the whole document, so the cover "
+              "spread can't share it with the body; building body only "
+              "(use --cover-only for the cover spread)." % backend.default_ext)
+    _build_body(backend, bs, page_limit)
+    return backend.doc
+
+
+def inject(backend, bs, page_limit=None):
+    """Build only the book body (no cover)."""
+    backend.init_styles(bs)
+    backend._bs = bs
+    backend.setup()
+    _build_body(backend, bs, page_limit)
+    return backend.doc
+
+
+def inject_cover(backend, bs, no_flaps=True):
+    """Build only the cover spread (one page)."""
+    if not bs.cover:
+        raise ValueError("This book has no cover to convert.")
+    backend.init_styles(bs)
+    backend._bs = bs
+    backend.setup()
+    _build_cover(backend, bs, no_flaps)
     return backend.doc
 
 
@@ -843,11 +874,15 @@ def main():
                     help="target model: odg (Draw, default) or odt (Writer)")
     ap.add_argument("-p", "--port", type=int, default=2002)
     ap.add_argument("-o", "--output", help="output file (default: <book>.<ext>)")
-    ap.add_argument("--pages", type=int, help="only build the first N pages")
-    ap.add_argument("--cover", action="store_true",
-                    help="build the cover spread instead of the book body")
-    ap.add_argument("--no-flaps", action="store_true",
-                    help="with --cover, omit the inner flaps from the spread")
+    ap.add_argument("--pages", type=int,
+                    help="only build the first N body pages")
+    ap.add_argument("--flaps", action="store_true",
+                    help="include the jacket-wrap flaps in the cover spread "
+                         "(default: omit them)")
+    ap.add_argument("--no-cover", action="store_true",
+                    help="skip the cover spread (body pages only)")
+    ap.add_argument("--cover-only", action="store_true",
+                    help="build only the cover spread")
     ap.add_argument("-b", "--booksmart-dir",
                     help="BookSmart3 program dir, to render decorative "
                          "text-box borders (ornament .bev assets)")
@@ -864,15 +899,17 @@ def main():
     backend_cls = BACKENDS[args.format]
     doc = desktop.loadComponentFromURL(backend_cls.factory, "_blank", 0, ())
     backend = backend_cls(doc, smgr, ctx, booksmart_dir=args.booksmart_dir)
-    if args.cover:
-        inject_cover(backend, bs, no_flaps=args.no_flaps)
-    else:
+    if args.cover_only:
+        inject_cover(backend, bs, no_flaps=not args.flaps)
+    elif args.no_cover:
         inject(backend, bs, page_limit=args.pages)
+    else:
+        inject_book(backend, bs, no_flaps=not args.flaps, page_limit=args.pages)
 
     if args.output:
         out = args.output
     else:
-        suffix = (" cover." if args.cover else ".") + backend_cls.default_ext
+        suffix = (" cover." if args.cover_only else ".") + backend_cls.default_ext
         out = os.path.splitext(args.book_file)[0] + suffix
     doc.storeToURL(uno.systemPathToFileUrl(os.path.abspath(out)),
                    (_pv("FilterName", backend_cls.filter_name),))
